@@ -2,8 +2,13 @@
 // OfflineAudioContext, so the C++ engine can be null-tested against the actual
 // Web Audio implementation rather than against my reading of it.
 //
-//   npm run audio          core set (committed): 60 seeds -> vectors/audio
-//   npm run audio -- --full  full sweep (gitignored): 315 seeds -> vectors/audio-full
+//   npm run audio             core set (committed): 60 seeds -> vectors/audio
+//   npm run audio -- --full     full sweep (gitignored): 315 seeds -> audio-full
+//   npm run audio -- --sustained  held notes -> vectors/audio-sustained
+//
+// The sustained set covers what a one-shot render cannot reach: the sustain
+// plateau and the release ramp off it. Every reference used to be a one-shot,
+// which is how a per-oscillator release-time bug survived unnoticed.
 //
 // Mono, because Z.play pans centre and the two channels come out bit-identical;
 // storing both would double the repo for nothing.
@@ -20,10 +25,16 @@ const CHROME = process.env.CHROME_PATH ??
   "C:/Program Files/Google/Chrome/Application/chrome.exe";
 
 const FULL = process.argv.includes("--full");
-const OUTDIR = resolve(here, FULL ? "../vectors/audio-full" : "../vectors/audio");
+const SUSTAINED = process.argv.includes("--sustained");
+const OUTDIR = resolve(here, SUSTAINED ? "../vectors/audio-sustained"
+                                       : FULL ? "../vectors/audio-full"
+                                              : "../vectors/audio");
 
 const SR = 48000;
-const SECONDS = 2;
+// Long enough that the slowest generated sustain ramp (1 s) has finished well
+// before the release, so the held level really is the sustain level.
+const SECONDS = SUSTAINED ? 4 : 2;
+const HOLD = 2.5;
 const CORE_COUNT = 60;
 
 const src = readFileSync(resolve(ZYN, "zyn-unminified.js"), "utf8");
@@ -106,7 +117,7 @@ const STABILITY_DB = -60;
 const STABILITY_RENDERS = 3;
 
 async function renderOnce(page, seed) {
-  return page.evaluate(async (seed, SR, SECONDS) => {
+  return page.evaluate(async (seed, SR, SECONDS, sustained, hold) => {
     const offline = new OfflineAudioContext(2, Math.round(SR * SECONDS), SR);
 
     // Replicate Z.init against the offline context: Z.init hardcodes
@@ -143,13 +154,51 @@ async function renderOnce(page, seed) {
       return ((((t ^ (t >>> 14)) >>> 0) / 4294967296) * 2) - 1;
     };
 
-    Z.play(0, Z.getInstrument(seed), 1.0);
+    if (sustained) {
+      const voiceId = Z.noteOn(0, Z.getInstrument(seed), 1.0);
+      const voice = Z.activeVoices[voiceId];
+
+      // The offline equivalent of Z.noteOff. zyn's version reads
+      // gain.gain.value, which offline is the value BEFORE rendering rather
+      // than the value at the release moment, so it would ramp from the wrong
+      // level. The held value is computable instead: adsrSustain's last event
+      // is a ramp to S[1] * max, and nothing follows it.
+      //
+      // cancelAndHoldAtTime looked like the right tool and is not: with no
+      // events after `hold` there is nothing for it to cancel, and the ramp
+      // that follows then interpolates from the LAST event -- the end of the
+      // sustain ramp around 0.1 s -- so the whole note became a slow linear
+      // fade to zero instead of a sustain. That produced a reference set that
+      // decayed steadily and made the engine look 5.8 dB wrong.
+      //
+      // setValueAtTime pins the sustain level at the release instant, which is
+      // what the live read of gain.gain.value returns. Everything else --
+      // per-gain release time, ramp to zero, shared stop time at the slowest
+      // release plus 50 ms -- is zyn's, unchanged.
+      let maxRelease = 0.015;
+      voice.gains.forEach(({ gain, env, max }) => {
+        const r = Math.max(env.R[0], 0.015);
+        const settled = env.A[0] + env.D[0] + env.S[0];
+        if (settled >= hold)
+          throw new Error(`seed ${seed}: envelope still ramping at release ` +
+                          `(${settled.toFixed(3)}s >= ${hold}s)`);
+        gain.gain.setValueAtTime(env.S[1] * max, hold);
+        gain.gain.linearRampToValueAtTime(0, hold + r);
+        maxRelease = Math.max(maxRelease, r);
+      });
+      const stopTime = hold + maxRelease + 0.05;
+      voice.oscs.forEach((o) => { try { o.stop(stopTime); } catch (e) {} });
+      voice.allNodes.forEach((n) => { try { n.stop(stopTime); } catch (e) {} });
+      delete Z.activeVoices[voiceId];
+    } else {
+      Z.play(0, Z.getInstrument(seed), 1.0);
+    }
     const buf = await offline.startRendering();
     const l = buf.getChannelData(0), r = buf.getChannelData(1);
     let m = 0;
     for (let i = 0; i < l.length; i++) m = Math.max(m, Math.abs(l[i] - r[i]));
     return { data: Array.from(l), maxLR: m };
-  }, seed, SR, SECONDS);
+  }, seed, SR, SECONDS, SUSTAINED, HOLD);
 }
 
 function stabilityDb(a, b) {
@@ -194,7 +243,9 @@ await browser.close();
 
 writeFileSync(resolve(OUTDIR, "MANIFEST.json"), JSON.stringify({
   zynCommit, sampleRate: SR, seconds: SECONDS, channels: 1,
-  note: 0, gain: 1.0, count: kept.length, set: FULL ? "full" : "core",
+  note: 0, gain: 1.0, count: kept.length,
+  set: SUSTAINED ? "sustained" : FULL ? "full" : "core",
+  sustained: SUSTAINED, holdSeconds: SUSTAINED ? HOLD : null,
   stabilityThresholdDb: STABILITY_DB,
   rejectedUnstable: rejected,
 }, null, 2));

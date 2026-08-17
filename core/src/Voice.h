@@ -102,7 +102,11 @@ private:
     std::array<std::array<double, kMaxFmDelaySamples>, kMaxOscs> fmHistory_{};
     int fmHistPos_ = 0;
 
-    std::array<double, kSubBlock> releaseMul_{};
+    // One ramp per oscillator, not one per voice. zyn's noteOff ramps every
+    // gain node with its OWN env.R[0], so an instrument whose oscillators have
+    // different release times releases them at different rates; a single
+    // voice-wide ramp at the slowest of them is audibly wrong on release.
+    std::array<std::array<double, kSubBlock>, kMaxOscs> releaseMul_{};
 
     bool active_ = false;
     bool sustained_ = false;

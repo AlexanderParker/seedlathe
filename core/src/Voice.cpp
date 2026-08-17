@@ -305,26 +305,34 @@ void Voice::processBlock(int frames) {
     while (done < frames && active_) {
         int n = std::min(subBlock_, frames - done);
 
-        // Release multiplier and end-of-note detection, shared by every
-        // oscillator in this sub-block.
+        // Release ramps and end-of-note detection. releaseLen_ is the LONGEST
+        // of the per-oscillator releases, so the voice lives until the slowest
+        // of them has finished even though the others reached zero earlier --
+        // which is what zyn's shared stopTime does.
         bool endsHere = false;
         int valid = n;
         for (int i = 0; i < n; ++i) {
             const double t = t_ + double(i) / sampleRate_;
-            double mul = 1.0;
-            if (released_) {
-                const double elapsed = t - releaseStart_;
-                mul = releaseLen_ > 0.0 ? 1.0 - elapsed / releaseLen_ : 0.0;
-                if (mul <= 0.0) { endsHere = true; valid = i; break; }
+            if (released_ && t - releaseStart_ >= releaseLen_) {
+                endsHere = true; valid = i; break;
             }
             if (!sustained_ && t > endTime_) { endsHere = true; valid = i; break; }
-            releaseMul_[static_cast<size_t>(i)] = mul;
+
+            for (int o = 0; o < inst_.oscCount; ++o) {
+                double mul = 1.0;
+                if (released_) {
+                    const double r = std::max(oscs_[static_cast<size_t>(o)].releaseTime, 0.015);
+                    mul = 1.0 - (t - releaseStart_) / r;
+                    if (mul < 0.0) mul = 0.0;
+                }
+                releaseMul_[static_cast<size_t>(o)][static_cast<size_t>(i)] = mul;
+            }
         }
         n = valid;
 
         if (n > 0) {
             for (int o = 0; o < inst_.oscCount; ++o)
-                renderOscillator(o, n, done, releaseMul_.data());
+                renderOscillator(o, n, done, releaseMul_[static_cast<size_t>(o)].data());
             fmHistPos_ = (fmHistPos_ + n) % kMaxFmDelaySamples;
             t_ += double(n) / sampleRate_;
             done += n;

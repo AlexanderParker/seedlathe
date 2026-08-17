@@ -1,0 +1,14 @@
+{
+  "zynCommit": "64aa6b2c97bbd5b9acc482fd8b18cee1a93dad1a",
+  "sampleRate": 48000,
+  "seconds": 4,
+  "channels": 1,
+  "note": 0,
+  "gain": 1,
+  "count": 60,
+  "set": "sustained",
+  "sustained": true,
+  "holdSeconds": 2.5,
+  "stabilityThresholdDb": -60,
+  "rejectedUnstable": []
+}
