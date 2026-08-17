@@ -10,6 +10,7 @@ enum ParamIdx {
     kOctave,
     kVoices,
     kTypeFilter,   // which instrument type the dice rolls, 0 = any
+    kOversample,   // 0 = off, 1 = 2x, 2 = 4x; the engine rate multiplier
     kNumParams
 };
 

@@ -73,6 +73,11 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
   GetParam(sl::kTypeFilter)->InitEnum("Type", 0, 11, "", IParam::kFlagsNone, "",
                                       "Any", "Pad", "Lead", "Bass", "Key", "Pluck",
                                       "Bell", "String", "Drum", "Perc", "FX");
+  // Off by default: oversampling is a deviation from zyn, which runs its graph
+  // at the context rate, so 2x and 4x change band limiting, filter coefficients
+  // and compressor timing. It is a quality option, not the reference.
+  GetParam(sl::kOversample)->InitEnum("Oversampling", 0, 3, "", IParam::kFlagsNone, "",
+                                      "Off", "2x", "4x");
 
   // Presets live beside the host's own plugin data rather than next to the
   // binary: a VST3 folder is often read-only, and on Windows it is under
@@ -159,7 +164,23 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
                                       IText(12.f, kDim)), kNoTag, "instrument");
     g->AttachControl(new ITextControl(page.GetReducedFromTop(20.f).GetFromTop(30.f), "",
                                       IText(19.f, kTextCol)), kCtrlTagTypeLabel, "instrument");
-    g->AttachControl(new IVScopeControl<1, 128>(page.GetReducedFromTop(58.f), "Output", style),
+    {
+      const IRECT engineRow = page.GetReducedFromTop(56.f).GetFromTop(52.f);
+      g->AttachControl(new IVTabSwitchControl(
+          engineRow.GetFromLeft(220.f).GetVPadded(-8.f), sl::kOversample,
+          {}, "Oversampling", style), kNoTag, "instrument");
+      g->AttachControl(new IVSliderControl(
+          engineRow.GetReducedFromLeft(236.f).GetFromLeft(160.f).GetVPadded(-8.f),
+          sl::kVoices, "Voices", style, false, EDirection::Horizontal),
+          kNoTag, "instrument");
+      g->AttachControl(new ITextControl(
+          engineRow.GetReducedFromLeft(400.f),
+          "Oversampling changes the sound: zyn runs its graph at the host rate, "
+          "so 2x and 4x shift band limiting and filter timing.",
+          IText(11.f, IColor(255, 110, 118, 130), nullptr, EAlign::Near)),
+          kNoTag, "instrument");
+    }
+    g->AttachControl(new IVScopeControl<1, 128>(page.GetReducedFromTop(114.f), "Output", style),
                      kCtrlTagScope, "instrument");
 
     // -- Presets
@@ -953,24 +974,9 @@ void Seedlathe::RebuildInstrument(bool force)
 
 void Seedlathe::OnReset()
 {
-  const double sr = GetSampleRate();
-
-  mRacks.prepare(sr, kNumRacks);
-  mPreparedVoices = GetParam(sl::kVoices)->Int();
-  mPool.prepare(sr, mPreparedVoices);
-  mComp.prepare(sr);
-  mComp.setParams(-12.0, 6.0, 8.0, 0.003, 0.15);   // zyn's Z.init settings
-
-  // Generous headroom: a host may hand ProcessBlock more frames than the
-  // reported block size, and growing the buffer there would allocate.
-  const size_t blockCap = std::max<size_t>(static_cast<size_t>(GetBlockSize()), 1024) * 4;
-  mLeft.assign(blockCap, 0.f);
-  mRight.assign(blockCap, 0.f);
-
+  mOsFactor = 1 << GetParam(sl::kOversample)->Int();
+  PrepareEngine();
   mPrepared = true;
-  // prepare() reallocated every rack at the new sample rate, so none of them
-  // holds an impulse for the current patch any more.
-  mRacksBuilt = false;
 
   // A restored patch must survive this. OnReset also runs after
   // UnserializeState, and regenerating from the seed there would silently
@@ -1035,6 +1041,8 @@ void Seedlathe::OnParamChange(int paramIdx)
   if (paramIdx == sl::kSeedHi || paramIdx == sl::kSeedLo) {
     RebuildInstrument();
     RefreshSeedDisplay();
+  } else if (paramIdx == sl::kOversample) {
+    Reconfigure();
   }
 }
 
@@ -1133,31 +1141,128 @@ void Seedlathe::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
 
   const int nChans = NOutChansConnected();
 
-  if (static_cast<int>(mLeft.size()) < nFrames)
+  // Claim the block before reading the reconfigure flag, not after. Half of the
+  // handshake in Reconfigure lives here: an odd counter means a block is in
+  // flight, and the message thread waits for it to go even before it touches
+  // anything the render walks.
+  mBlockSeq.fetch_add(1, std::memory_order_acq_rel);
+
+  const bool bail = mReconfiguring.load(std::memory_order_acquire) ||
+                    static_cast<int>(mLeft.size()) < nFrames * mOsFactor;
+
+  if (bail)
   {
-    // Should not happen: OnReset sizes to the host block. Bail rather than
-    // allocate on the audio thread.
+    // Either the engine is being rebuilt at a new rate, or the host handed over
+    // more frames than OnReset sized for. Silence beats allocating here.
     for (int c = 0; c < nChans; ++c)
       for (int s = 0; s < nFrames; ++s) outputs[c][s] = 0.;
+    mBlockSeq.fetch_add(1, std::memory_order_release);
     _mm_setcsr(mxcsr);
     return;
   }
 
+  // At 2x and 4x the engine is prepared at that multiple of the host rate, so
+  // it renders that many frames and the decimator brings them back down.
+  const int engineFrames = nFrames * mOsFactor;
+
   mRacks.audioBlockStarted(mPool);
-  mPool.render(mLeft.data(), mRight.data(), nFrames,
+  mPool.render(mLeft.data(), mRight.data(), engineFrames,
                mRacks.all(), mRacks.allCount());
 
-  for (int s = 0; s < nFrames; ++s)
+  // The compressor runs at the engine rate, before decimation: it is part of
+  // the instrument's sound, and running it after would change its timing.
+  for (int s = 0; s < engineFrames; ++s)
   {
     double l = 0.0, r = 0.0;
     mComp.process(mLeft[s], mRight[s], l, r);   // Z.masterGain is unity
-    if (nChans > 0) outputs[0][s] = l;
-    if (nChans > 1) outputs[1][s] = r;
+    mLeft[s] = static_cast<float>(l);
+    mRight[s] = static_cast<float>(r);
+  }
+
+  if (mOsFactor == 1)
+  {
+    for (int s = 0; s < nFrames; ++s)
+    {
+      if (nChans > 0) outputs[0][s] = mLeft[s];
+      if (nChans > 1) outputs[1][s] = mRight[s];
+    }
+  }
+  else
+  {
+    mDecimL.process(mLeft.data(), mDownL.data(), nFrames);
+    mDecimR.process(mRight.data(), mDownR.data(), nFrames);
+    for (int s = 0; s < nFrames; ++s)
+    {
+      if (nChans > 0) outputs[0][s] = mDownL[s];
+      if (nChans > 1) outputs[1][s] = mDownR[s];
+    }
   }
 
   mScopeSender.ProcessBlock(outputs, nFrames, kCtrlTagScope, 1);
 
+  mBlockSeq.fetch_add(1, std::memory_order_release);
   _mm_setcsr(mxcsr);
+}
+
+void Seedlathe::Reconfigure()
+{
+  if (!mPrepared)
+    return;
+
+  const int wanted = 1 << GetParam(sl::kOversample)->Int();   // 1, 2 or 4
+  if (wanted == mOsFactor)
+    return;
+
+  // Quiescence handshake. Setting the flag makes every block that starts from
+  // now on bail out without touching the engine; waiting for an even counter
+  // then proves no block that started earlier is still inside one. Only after
+  // both is it safe to free and reallocate what the render walks.
+  //
+  // If the host is not calling ProcessBlock at all the counter is already even
+  // and this returns at once, which is the same conclusion by a shorter route.
+  mReconfiguring.store(true, std::memory_order_release);
+  for (int i = 0; i < 400; ++i)
+  {
+    if ((mBlockSeq.load(std::memory_order_acquire) & 1) == 0)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+
+  mOsFactor = wanted;
+  PrepareEngine();
+
+  mReconfiguring.store(false, std::memory_order_release);
+}
+
+void Seedlathe::PrepareEngine()
+{
+  // Everything downstream of here is sized and tuned for the rate the engine
+  // runs at, which is the host rate times the oversampling factor.
+  const double rate = GetSampleRate() * mOsFactor;
+
+  mRacks.prepare(rate, kNumRacks);
+  mPreparedVoices = GetParam(sl::kVoices)->Int();
+  mPool.prepare(rate, mPreparedVoices);
+  mComp.prepare(rate);
+  mComp.setParams(-12.0, 6.0, 8.0, 0.003, 0.15);   // zyn's Z.init settings
+
+  mDecimL.prepare(mOsFactor);
+  mDecimR.prepare(mOsFactor);
+
+  // Generous headroom: a host may hand ProcessBlock more frames than the
+  // reported block size, and growing the buffer there would allocate.
+  const size_t hostCap = std::max<size_t>(static_cast<size_t>(GetBlockSize()), 1024) * 4;
+  const size_t engineCap = hostCap * static_cast<size_t>(mOsFactor);
+  mLeft.assign(engineCap, 0.f);
+  mRight.assign(engineCap, 0.f);
+  mDownL.assign(hostCap, 0.f);
+  mDownR.assign(hostCap, 0.f);
+
+  // prepare() reallocated every rack at the new rate, so none of them holds an
+  // impulse for the current patch any more.
+  mRacksBuilt = false;
+
+  SetLatency(mDecimL.latencySamples());
 }
 
 #endif

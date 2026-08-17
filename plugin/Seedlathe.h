@@ -10,6 +10,7 @@
 #include "SeedlatheParams.h"
 #include "RackPool.h"
 #include "SampleMatch.h"
+#include "Oversampler.h"
 #include "UserPresets.h"
 #include "SeedSearch.h"
 #include "SharedFxRack.h"
@@ -20,6 +21,8 @@
 #include <array>
 #include <string>
 #include <atomic>
+#include <chrono>
+#include <thread>
 #include <vector>
 
 const int kNumPresets = 1;
@@ -68,6 +71,15 @@ private:
   // Regenerates the edit buffer from the current Seed Hi/Lo, discarding any
   // designer edits, and queues it for publication. Message thread only.
   void RebuildInstrument(bool force = false);
+
+  // Rebuilds every rate-dependent part of the engine at GetSampleRate() times
+  // the oversampling factor. Allocates, so message thread only, and only when
+  // the audio thread is known not to be inside ProcessBlock.
+  void PrepareEngine();
+
+  // Applies a change of oversampling factor, with the handshake that makes
+  // reallocating under a running audio thread safe.
+  void Reconfigure();
   void SetSeed(uint32_t seed);
   void RollRandomSeed();
   void RefreshSeedDisplay();
@@ -147,6 +159,18 @@ private:
   uint32_t mCurrentSeed = 0;
   bool mHasSeed = false;
   bool mRacksBuilt = false;
+
+  // Oversampling. 1, 2 or 4; the engine is prepared at that multiple of the
+  // host rate and the decimator brings each block back down.
+  int mOsFactor = 1;
+  sl::Decimator mDecimL, mDecimR;
+  std::vector<float> mDownL, mDownR;
+
+  // The handshake that lets the message thread reallocate the engine. Odd means
+  // a block is in flight; the flag makes new blocks bail out without touching
+  // anything. See Reconfigure.
+  std::atomic<unsigned> mBlockSeq{0};
+  std::atomic<bool> mReconfiguring{false};
   int mPreparedVoices = 0;
   bool mPrepared = false;
 
