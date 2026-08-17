@@ -8,6 +8,11 @@ namespace sl {
 // DelayNode with a feedback loop, matching how zyn wires it: the node's output
 // is fed back through a gain into its own input, and the SAME node instance is
 // shared by every voice with an identical configuration (see SharedFxRack).
+// Stereo, and driven by accumulate-then-advance rather than a per-caller
+// process() call. That is not a style choice: in Web Audio every voice
+// connects to the SAME node input and their signals sum before the node runs
+// once per sample. Letting each voice call process() would advance the delay
+// line once per voice and smear every note across different tap positions.
 class WaDelay {
 public:
     void prepare(double sampleRate, double maxSeconds);
@@ -15,14 +20,28 @@ public:
     void setFeedback(double f) { feedback_ = f; }
     void reset();
 
-    double process(double x);
+    void addInput(double l, double r) { accL_ += l; accR_ += r; }
+    void advance();
+    double outL() const { return outL_; }
+    double outR() const { return outR_; }
+
+    // Mono convenience for tests: one input, one advance, one output.
+    double process(double x) {
+        addInput(x, x);
+        advance();
+        return outL_;
+    }
 
 private:
-    std::vector<double> buffer_;
+    double tap(std::vector<double>& buf, double in);
+
+    std::vector<double> bufferL_, bufferR_;
     size_t writePos_ = 0;
     double sampleRate_ = 48000.0;
     double delaySamples_ = 0.0;
     double feedback_ = 0.0;
+    double accL_ = 0.0, accR_ = 0.0;
+    double outL_ = 0.0, outR_ = 0.0;
 };
 
 // ConvolverNode with zyn's generated impulse:
@@ -41,7 +60,18 @@ public:
     bool ready() const { return ready_; }
     void reset();
 
-    void process(double inL, double inR, double& outL, double& outR);
+    // Same accumulate-then-advance contract as WaDelay, for the same reason.
+    void addInput(double l, double r) { accL_ += l; accR_ += r; }
+    void advance();
+    double outL() const { return outL_; }
+    double outR() const { return outR_; }
+
+    void process(double inL, double inR, double& outL, double& outR) {
+        addInput(inL, inR);
+        advance();
+        outL = outL_;
+        outR = outR_;
+    }
 
 private:
     struct Channel {
@@ -58,6 +88,8 @@ private:
 
     double sampleRate_ = 48000.0;
     bool ready_ = false;
+    double accL_ = 0.0, accR_ = 0.0;
+    double outL_ = 0.0, outR_ = 0.0;
     size_t blockSize_ = 256;
     size_t partitions_ = 0;
     std::vector<std::vector<double>> irRe_, irIm_;

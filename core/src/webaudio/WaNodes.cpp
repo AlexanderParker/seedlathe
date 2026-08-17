@@ -26,38 +26,54 @@ const Fft& fftOfSize(size_t n) {
 
 void WaDelay::prepare(double sampleRate, double maxSeconds) {
     sampleRate_ = sampleRate;
-    buffer_.assign(static_cast<size_t>(sampleRate * maxSeconds) + 4, 0.0);
+    const size_t n = static_cast<size_t>(sampleRate * maxSeconds) + 4;
+    bufferL_.assign(n, 0.0);
+    bufferR_.assign(n, 0.0);
     writePos_ = 0;
+    accL_ = accR_ = outL_ = outR_ = 0.0;
 }
 
 void WaDelay::setDelayTime(double seconds) {
     delaySamples_ = seconds * sampleRate_;
-    const double maxD = double(buffer_.size()) - 2.0;
+    const double maxD = double(bufferL_.size()) - 2.0;
     if (delaySamples_ > maxD) delaySamples_ = maxD;
     if (delaySamples_ < 0.0) delaySamples_ = 0.0;
 }
 
 void WaDelay::reset() {
-    std::fill(buffer_.begin(), buffer_.end(), 0.0);
+    std::fill(bufferL_.begin(), bufferL_.end(), 0.0);
+    std::fill(bufferR_.begin(), bufferR_.end(), 0.0);
     writePos_ = 0;
+    accL_ = accR_ = outL_ = outR_ = 0.0;
 }
 
-double WaDelay::process(double x) {
-    if (buffer_.empty()) return x;
-    const size_t n = buffer_.size();
+double WaDelay::tap(std::vector<double>& buf, double in) {
+    const size_t n = buf.size();
 
-    // Read first, then write: a DelayNode inside a feedback loop has at least
-    // one render quantum of delay, and reading before writing is what stops a
-    // zero delay time from becoming an infinite-gain algebraic loop.
+    // Read first, then write. A DelayNode sitting inside its own feedback loop
+    // always has at least one sample of delay, and reading before writing is
+    // what stops a near-zero delay time becoming an infinite-gain algebraic
+    // loop.
     const double readPos = double(writePos_) + double(n) - delaySamples_;
     const size_t i0 = static_cast<size_t>(readPos) % n;
     const size_t i1 = (i0 + 1) % n;
     const double frac = readPos - std::floor(readPos);
-    const double out = buffer_[i0] + (buffer_[i1] - buffer_[i0]) * frac;
+    const double out = buf[i0] + (buf[i1] - buf[i0]) * frac;
 
-    buffer_[writePos_] = x + out * feedback_;
-    if (++writePos_ >= n) writePos_ = 0;
+    buf[writePos_] = in + out * feedback_;
     return out;
+}
+
+void WaDelay::advance() {
+    if (bufferL_.empty()) {
+        outL_ = accL_; outR_ = accR_;
+        accL_ = accR_ = 0.0;
+        return;
+    }
+    outL_ = tap(bufferL_, accL_);
+    outR_ = tap(bufferR_, accR_);
+    accL_ = accR_ = 0.0;
+    if (++writePos_ >= bufferL_.size()) writePos_ = 0;
 }
 
 // ------------------------------------------------------------ WaConvolver
@@ -155,8 +171,11 @@ void WaConvolver::processBlock(Channel& c) {
     c.outPos = 0;
 }
 
-void WaConvolver::process(double inL, double inR, double& outL, double& outR) {
-    if (!ready_) { outL = 0.0; outR = 0.0; return; }
+void WaConvolver::advance() {
+    const double inL = accL_, inR = accR_;
+    accL_ = accR_ = 0.0;
+
+    if (!ready_) { outL_ = 0.0; outR_ = 0.0; return; }
 
     auto step = [this](Channel& c, double in) {
         c.inBlock[c.fill] = in;
@@ -167,8 +186,8 @@ void WaConvolver::process(double inL, double inR, double& outL, double& outR) {
         }
         return out;
     };
-    outL = step(left_, inL);
-    outR = step(right_, inR);
+    outL_ = step(left_, inL);
+    outR_ = step(right_, inR);
 }
 
 // -------------------------------------------------------------- WaPanner
