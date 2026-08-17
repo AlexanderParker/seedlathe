@@ -4,6 +4,7 @@ add_executable(sl_tests
   test_mulberry32.cpp
   test_presetio.cpp
   test_instrumentgen.cpp
+  test_waparam.cpp
 )
 
 target_link_libraries(sl_tests PRIVATE sl_core Catch2::Catch2WithMain)

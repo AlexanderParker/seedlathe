@@ -1,6 +1,7 @@
 add_library(sl_core STATIC
   src/InstrumentGen.cpp
   src/PresetIO.cpp
+  src/webaudio/WaParam.cpp
 )
 
 target_include_directories(sl_core
