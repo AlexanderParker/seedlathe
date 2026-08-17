@@ -19,11 +19,12 @@ struct Rig {
         voice.prepare(sr, &rack);
     }
     // Runs the graph one sample and returns the master output.
+    float bufL[1] = {0.f}, bufR[1] = {0.f};
     double step() {
-        voice.process();
-        double l, r;
-        rack.mixAndAdvance(l, r);
-        return l;
+        rack.beginBlock(1);
+        voice.processBlock(1);
+        rack.mixBlock(bufL, bufR, 1);
+        return bufL[0];
     }
 };
 
@@ -162,13 +163,16 @@ TEST_CASE("every seed renders finite audio") {
         rack.reset();
         v.noteOn(sl::generateInstrument(s), 0, 1.0, false);
         rack.buildPending();
-        for (int i = 0; i < 12000; ++i) {
-            v.process();
-            double l, r;
-            rack.mixAndAdvance(l, r);
-            INFO("seed " << s << " sample " << i);
-            REQUIRE(std::isfinite(l));
-            REQUIRE(std::isfinite(r));
+        float bl[256], br[256];
+        for (int b = 0; b < 12000 / 256; ++b) {
+            rack.beginBlock(256);
+            v.processBlock(256);
+            rack.mixBlock(bl, br, 256);
+            for (int i = 0; i < 256; ++i) {
+                INFO("seed " << s << " block " << b << " sample " << i);
+                REQUIRE(std::isfinite(bl[i]));
+                REQUIRE(std::isfinite(br[i]));
+            }
         }
         v.kill();
     }
@@ -190,13 +194,16 @@ TEST_CASE("seeds with an FM matrix stay bounded") {
         v.noteOn(inst, 0, 1.0, false);
         rack.buildPending();
         double peak = 0.0;
-        for (int i = 0; i < 24000; ++i) {
-            v.process();
-            double l, r;
-            rack.mixAndAdvance(l, r);
-            INFO("seed " << s << " sample " << i);
-            REQUIRE(std::isfinite(l));
-            peak = std::max(peak, std::abs(l));
+        float bl[256], br[256];
+        for (int b = 0; b < 24000 / 256; ++b) {
+            rack.beginBlock(256);
+            v.processBlock(256);
+            rack.mixBlock(bl, br, 256);
+            for (int i = 0; i < 256; ++i) {
+                INFO("seed " << s << " block " << b << " sample " << i);
+                REQUIRE(std::isfinite(bl[i]));
+                peak = std::max(peak, std::abs(double(bl[i])));
+            }
         }
         INFO("seed " << s << " peak " << peak);
         REQUIRE(peak < 50.0);

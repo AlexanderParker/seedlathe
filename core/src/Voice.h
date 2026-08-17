@@ -6,6 +6,7 @@
 #include "webaudio/WaOscillator.h"
 #include "webaudio/WaParam.h"
 #include <array>
+#include <cstdint>
 #include <vector>
 
 namespace sl {
@@ -16,8 +17,11 @@ double noteFrequency(int rootNote, int noteOffset);
 // One sounding note. Holds its own copy of the instrument, so editing the
 // design mid-chord cannot mutate a ringing voice.
 //
-// A voice does not return audio. It pushes into the shared FX graph, which the
-// pool advances once per sample -- see SharedFxRack for why that matters.
+// Rendering is block-based, one oscillator at a time. Interleaving voices and
+// oscillators sample by sample meant a voice's state was evicted from L1 by
+// every other voice on every sample; at eight voices that made the path
+// memory-bound rather than arithmetic-bound, and further micro-optimising the
+// arithmetic stopped helping at all.
 class Voice {
 public:
     void prepare(double sampleRate, SharedFxRack* rack);
@@ -26,7 +30,8 @@ public:
     void noteOff();
     void kill();                    // immediate, for voice stealing
 
-    void process();                 // one sample into the rack
+    // Renders `frames` samples into the shared FX graph's block buffers.
+    void processBlock(int frames);
 
     bool active() const { return active_; }
     int note() const { return note_; }
@@ -54,19 +59,27 @@ private:
         double baseFreq = 0.0;
         double releaseTime = 0.0;
         SharedFxRack::Route route;
-        double out = 0.0;           // last oscillator output, for the FM matrix
+
+        // Mono output for the current block; panned as it is pushed.
+        std::vector<double> out;
+        int coeffCounter = 0;
     };
 
-    // Modulation-path delay for FM matrix edges. zyn inserts one to break
-    // feedback loops; generated instruments always use its 1 ms default.
+    // An oscillator can be rendered a whole sub-block ahead of the ones that
+    // modulate it only while the modulation delay is at least that long. zyn's
+    // generated FM delay is 1 ms -- 48 samples at 48 kHz -- so 32 is safe; a
+    // shorter designed delay drops this voice to single-sample steps.
+    static constexpr int kSubBlock = 32;
     static constexpr int kMaxFmDelaySamples = 512;
+
     struct FmEdge {
         int src = 0, tgt = 0;
         double gain = 0.0;
-        std::array<double, kMaxFmDelaySamples> line{};
         int len = 1;
-        int pos = 0;
     };
+
+    void renderOscillator(int oscIndex, int frames, int outOffset,
+                          const double* releaseMul);
 
     double sampleRate_ = 48000.0;
     SharedFxRack* rack_ = nullptr;
@@ -74,6 +87,15 @@ private:
     Instrument inst_{};
     std::array<OscState, kMaxOscs> oscs_{};
     std::vector<FmEdge> fmEdges_;
+    int subBlock_ = kSubBlock;
+
+    // Per-oscillator output history, read by every FM matrix edge. One ring per
+    // oscillator rather than one per edge: 25 edges would otherwise each carry
+    // their own copy of the same signal.
+    std::array<std::array<double, kMaxFmDelaySamples>, kMaxOscs> fmHistory_{};
+    int fmHistPos_ = 0;
+
+    std::array<double, kSubBlock> releaseMul_{};
 
     bool active_ = false;
     bool sustained_ = false;
@@ -84,12 +106,9 @@ private:
     double endTime_ = 0.0;
     double releaseStart_ = 0.0;
     double releaseLen_ = 0.0;
-    double releaseFrom_ = 1.0;
     uint64_t startStamp_ = 0;
 
-    // Filter coefficients are refreshed on this cadence, not every sample.
     static constexpr int kCoeffInterval = 8;
-    int coeffCounter_ = 0;
 
     // Pan is fixed for the life of a note, so its gains are resolved once.
     double panL_ = 0.7071067811865476, panR_ = 0.7071067811865476;

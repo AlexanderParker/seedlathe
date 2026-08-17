@@ -4,7 +4,9 @@
 #include "webaudio/WaCompressor.h"
 #include <cstdint>
 #include <cstring>
+#include <algorithm>
 #include <fstream>
+#include <vector>
 
 namespace sl {
 
@@ -33,17 +35,28 @@ RenderResult renderOffline(const Instrument& inst, int note, double gain,
     out.left.resize(frames);
     out.right.resize(frames);
 
-    for (size_t i = 0; i < frames; ++i) {
-        voice.process();
-        double l = 0.0, r = 0.0;
-        rack.mixAndAdvance(l, r);
+    // Same block path the plugin uses, so the fidelity test exercises the code
+    // that actually ships rather than a parallel per-sample one.
+    std::vector<float> bufL(SharedFxRack::kMaxBlock);
+    std::vector<float> bufR(SharedFxRack::kMaxBlock);
 
-        // Z.masterGain is left at unity; zyn never assigns it.
-        double cl = 0.0, cr = 0.0;
-        comp.process(l, r, cl, cr);
+    size_t done = 0;
+    while (done < frames) {
+        const int n = static_cast<int>(
+            std::min<size_t>(frames - done, SharedFxRack::kMaxBlock));
 
-        out.left[i] = static_cast<float>(cl);
-        out.right[i] = static_cast<float>(cr);
+        rack.beginBlock(n);
+        voice.processBlock(n);
+        rack.mixBlock(bufL.data(), bufR.data(), n);
+
+        for (int i = 0; i < n; ++i) {
+            // Z.masterGain is left at unity; zyn never assigns it.
+            double cl = 0.0, cr = 0.0;
+            comp.process(bufL[static_cast<size_t>(i)], bufR[static_cast<size_t>(i)], cl, cr);
+            out.left[done + static_cast<size_t>(i)] = static_cast<float>(cl);
+            out.right[done + static_cast<size_t>(i)] = static_cast<float>(cr);
+        }
+        done += static_cast<size_t>(n);
     }
     return out;
 }

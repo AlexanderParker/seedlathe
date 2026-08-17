@@ -50,6 +50,7 @@ void Voice::prepare(double sampleRate, SharedFxRack* rack) {
         o.pLfo.prepare(sampleRate);
         o.fmOsc.prepare(sampleRate);
     }
+    for (auto& o : oscs_) o.out.assign(SharedFxRack::kMaxBlock, 0.0);
     fmEdges_.reserve(kMaxOscs * kMaxOscs);
     active_ = false;
 }
@@ -66,7 +67,6 @@ void Voice::noteOn(const Instrument& inst, int note, double gain, bool sustained
     level_ = 0.0;
     endTime_ = 0.0;
     startStamp_ = ++g_stamp;
-    coeffCounter_ = 0;
     WaPanner::gains(0.0, panL_, panR_);
 
     const int n = inst_.oscCount;
@@ -150,7 +150,7 @@ void Voice::noteOn(const Instrument& inst, int note, double gain, bool sustained
         if (s.hasPitchEnv) s.pitchEnv.beginStepping(sampleRate_);
 
         s.route = rack_->acquireRoute(c);
-        s.out = 0.0;
+        s.coeffCounter = 0;
     }
 
     // FM matrix. zyn skips any edge touching a noise oscillator and routes the
@@ -176,12 +176,19 @@ void Voice::noteOn(const Instrument& inst, int note, double gain, bool sustained
                 if (d <= 0.0) d = 0.001;   // zyn's default
                 e.len = std::clamp(static_cast<int>(d * sampleRate_), 1,
                                    kMaxFmDelaySamples - 1);
-                e.line.fill(0.0);
-                e.pos = 0;
                 fmEdges_.push_back(e);
             }
         }
     }
+
+    // An oscillator may only be rendered a sub-block ahead of its modulator
+    // while the modulation delay is at least that long.
+    subBlock_ = kSubBlock;
+    for (const auto& e : fmEdges_) subBlock_ = std::min(subBlock_, e.len);
+    if (subBlock_ < 1) subBlock_ = 1;
+
+    for (auto& ring : fmHistory_) ring.fill(0.0);
+    fmHistPos_ = 0;
 }
 
 void Voice::noteOff() {
@@ -194,7 +201,6 @@ void Voice::noteOff() {
     for (int i = 0; i < inst_.oscCount; ++i)
         r = std::max(r, std::max(oscs_[static_cast<size_t>(i)].releaseTime, 0.015));
     releaseLen_ = r;
-    releaseFrom_ = 1.0;
 }
 
 void Voice::kill() {
@@ -202,101 +208,136 @@ void Voice::kill() {
     level_ = 0.0;
 }
 
-void Voice::process() {
-    if (!active_) return;
+void Voice::renderOscillator(int oscIndex, int frames, int outOffset,
+                             const double* releaseMul) {
+    OscState& s = oscs_[static_cast<size_t>(oscIndex)];
+    const Osc& c = inst_.oscs[static_cast<size_t>(oscIndex)];
+    double* __restrict out = s.out.data() + outOffset;
+
+    // Gather the FM matrix edges targeting this oscillator once, not per
+    // sample. The modulator's history is at least a sub-block old, so it is
+    // complete before this oscillator runs.
+    const FmEdge* edges[kMaxOscs * kMaxOscs];
+    int edgeCount = 0;
+    for (const auto& e : fmEdges_)
+        if (e.tgt == oscIndex) edges[edgeCount++] = &e;
 
     double peak = 0.0;
 
-    // Snapshot last-sample oscillator outputs so every FM matrix edge reads
-    // the same generation, rather than seeing partially updated neighbours.
-    double prevOut[kMaxOscs];
-    for (int i = 0; i < inst_.oscCount; ++i)
-        prevOut[i] = oscs_[static_cast<size_t>(i)].out;
-
-    // Release multiplier, applied on top of the sustain envelope.
-    double releaseMul = 1.0;
-    if (released_) {
-        const double elapsed = t_ - releaseStart_;
-        releaseMul = releaseLen_ > 0.0 ? 1.0 - elapsed / releaseLen_ : 0.0;
-        if (releaseMul <= 0.0) { active_ = false; level_ = 0.0; return; }
-    }
-
-    for (int i = 0; i < inst_.oscCount; ++i) {
-        OscState& s = oscs_[static_cast<size_t>(i)];
-        const Osc& c = inst_.oscs[static_cast<size_t>(i)];
-
+    for (int i = 0; i < frames; ++i) {
         double sample;
         if (s.isNoise) {
             sample = s.noise.render();
         } else {
-            // Base frequency, or the pitch envelope's value when it replaces it.
+            // The pitch envelope REPLACES the oscillator frequency rather than
+            // offsetting it: zyn schedules setValueAtTime(0) then ramps to
+            // oFreq * amount, so the oscillator starts at 0 Hz.
             double freq = s.hasPitchEnv ? s.pitchEnv.nextValue() : s.baseFreq;
 
             // Connected AudioParam inputs sum on top of the automation value.
-            if (s.hasPLfo) freq += s.pLfo.render(inst_.oscs[static_cast<size_t>(i)]
-                                                     .pLfo.frequency) * s.pLfoDepth;
+            if (s.hasPLfo) freq += s.pLfo.render(c.pLfo.frequency) * s.pLfoDepth;
             if (s.hasFm) freq += s.fmOsc.render(s.fmFreq) * s.fmDepth;
 
-            for (auto& e : fmEdges_) {
-                if (e.tgt != i) continue;
-                const double delayed = e.line[static_cast<size_t>(e.pos)];
-                freq += delayed * e.gain;
+            for (int e = 0; e < edgeCount; ++e) {
+                const FmEdge& edge = *edges[e];
+                int idx = fmHistPos_ + i - edge.len;
+                while (idx < 0) idx += kMaxFmDelaySamples;
+                idx %= kMaxFmDelaySamples;
+                freq += fmHistory_[static_cast<size_t>(edge.src)]
+                                  [static_cast<size_t>(idx)] * edge.gain;
             }
 
             sample = s.osc.render(freq);
         }
 
-        s.out = sample;
+        // Raw oscillator output feeds the FM matrix history.
+        {
+            int idx = (fmHistPos_ + i) % kMaxFmDelaySamples;
+            fmHistory_[static_cast<size_t>(oscIndex)][static_cast<size_t>(idx)] = sample;
+        }
 
         if (s.useShaper) sample = s.shaper.process(sample);
 
         double cutoff = s.filterEnv.nextValue();
         if (s.hasFLfo) cutoff += s.fLfo.render(c.fLfo.frequency) * s.fLfoDepth;
         const double q = s.qEnv.nextValue();
-        // Coefficients are refreshed every kCoeffInterval samples rather than
-        // every sample. Recomputing them costs about seven times the filtering
-        // itself -- two transcendentals plus a pow -- and at polyphony that
-        // alone blew the audio callback's deadline. The envelopes driving
-        // cutoff and Q are linear ramps, so at 48 kHz this quantises them to
-        // 0.17 ms. The cost to fidelity is measured, not assumed: see
-        // vectors/fidelity-thresholds.json.
-        if (coeffCounter_ == 0)
+        // Coefficients are refreshed every kCoeffInterval samples. Recomputing
+        // them costs about seven times the filtering itself -- two
+        // transcendentals plus a pow -- and the envelopes driving cutoff and Q
+        // are linear ramps, so this quantises them to 0.17 ms at 48 kHz.
+        //
         // ALWAYS lowpass, regardless of osc.filterType. zyn generates a
         // filterType into every oscillator and then never assigns it to the
-        // node -- render() creates the BiquadFilterNode and sets only .Q and
-        // .frequency, so every filter in zyn is the Web Audio default, which is
-        // lowpass. Honouring filterType here would mis-filter the ~86% of
-        // oscillators whose generated type is something else. The field is
-        // still carried in the data model because the search scorer reads it,
-        // exactly like filterQ.
-        s.filter.setCoefficients(FilterType::Lowpass, cutoff, q, 0.0);
+        // node, so every filter in zyn is the Web Audio default. The field is
+        // still carried in the data model because the search scorer reads it.
+        if (s.coeffCounter == 0)
+            s.filter.setCoefficients(FilterType::Lowpass, cutoff, q, 0.0);
+        if (++s.coeffCounter >= kCoeffInterval) s.coeffCounter = 0;
         sample = s.filter.process(sample);
 
         double g = s.gainEnv.nextValue();
         if (s.hasGLfo) g += s.gLfo.render(c.gLfo.frequency) * s.gLfoDepth;
-        g *= releaseMul;
+        g *= releaseMul[i];
         sample *= g;
 
-        peak = std::max(peak, std::abs(sample));
-
-        // zyn's Z.play uses pan 0, so the panner is centred equal-power. The
-        // gains are constant for the life of the note and are resolved in
-        // noteOn: computing them here meant two libm calls per oscillator per
-        // sample to arrive at a fixed 0.7071.
-        rack_->push(s.route, sample * panL_, sample * panR_);
+        const double a = sample < 0.0 ? -sample : sample;
+        if (a > peak) peak = a;
+        out[i] = sample;
     }
 
-    // Advance the FM matrix modulation delays with this sample's outputs.
-    for (auto& e : fmEdges_) {
-        e.line[static_cast<size_t>(e.pos)] = prevOut[e.src];
-        e.pos = (e.pos + 1) % e.len;
+    if (peak > level_) level_ = peak;
+}
+
+void Voice::processBlock(int frames) {
+    if (!active_) return;
+
+    for (int o = 0; o < inst_.oscCount; ++o)
+        std::fill_n(oscs_[static_cast<size_t>(o)].out.begin(), frames, 0.0);
+
+    level_ = 0.0;
+    int done = 0;
+
+    while (done < frames && active_) {
+        int n = std::min(subBlock_, frames - done);
+
+        // Release multiplier and end-of-note detection, shared by every
+        // oscillator in this sub-block.
+        bool endsHere = false;
+        int valid = n;
+        for (int i = 0; i < n; ++i) {
+            const double t = t_ + double(i) / sampleRate_;
+            double mul = 1.0;
+            if (released_) {
+                const double elapsed = t - releaseStart_;
+                mul = releaseLen_ > 0.0 ? 1.0 - elapsed / releaseLen_ : 0.0;
+                if (mul <= 0.0) { endsHere = true; valid = i; break; }
+            }
+            if (!sustained_ && t > endTime_) { endsHere = true; valid = i; break; }
+            releaseMul_[static_cast<size_t>(i)] = mul;
+        }
+        n = valid;
+
+        if (n > 0) {
+            for (int o = 0; o < inst_.oscCount; ++o)
+                renderOscillator(o, n, done, releaseMul_.data());
+            fmHistPos_ = (fmHistPos_ + n) % kMaxFmDelaySamples;
+            t_ += double(n) / sampleRate_;
+            done += n;
+        }
+
+        if (endsHere) {
+            active_ = false;
+            level_ = 0.0;
+            break;
+        }
     }
 
-    if (++coeffCounter_ >= kCoeffInterval) coeffCounter_ = 0;
-    level_ = peak;
-    t_ += 1.0 / sampleRate_;
-
-    if (!sustained_ && t_ > endTime_) { active_ = false; level_ = 0.0; }
+    // zyn's Z.play pans centre, so the panner is a pair of constant gains
+    // resolved at note-on rather than a cos/sin per sample.
+    for (int o = 0; o < inst_.oscCount; ++o) {
+        const OscState& s = oscs_[static_cast<size_t>(o)];
+        rack_->pushBlockMono(s.route, s.out.data(), panL_, panR_, frames);
+    }
 }
 
 // ------------------------------------------------------------- VoicePool
@@ -334,19 +375,21 @@ void VoicePool::allNotesOff() {
 }
 
 void VoicePool::render(float* left, float* right, int frames) {
-    // Gather the active voices once per block instead of testing all of them
-    // on every sample. With a 32-voice pool and 8 notes held, that removed
-    // about a million wasted calls a second.
-    active_.clear();
-    for (auto& v : voices_)
-        if (v.active()) active_.push_back(&v);
+    int done = 0;
+    while (done < frames) {
+        const int n = std::min(frames - done, SharedFxRack::kMaxBlock);
 
-    for (int i = 0; i < frames; ++i) {
-        for (Voice* v : active_) v->process();
-        double l = 0.0, r = 0.0;
-        rack_->mixAndAdvance(l, r);
-        left[i] = static_cast<float>(l);
-        right[i] = static_cast<float>(r);
+        // Gather the active voices once per block instead of testing all of
+        // them on every sample.
+        active_.clear();
+        for (auto& v : voices_)
+            if (v.active()) active_.push_back(&v);
+
+        rack_->beginBlock(n);
+        for (Voice* v : active_) v->processBlock(n);
+        rack_->mixBlock(left + done, right + done, n);
+
+        done += n;
     }
 }
 

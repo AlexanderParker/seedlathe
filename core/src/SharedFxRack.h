@@ -63,6 +63,20 @@ public:
     // graph and returns the summed master signal.
     void mixAndAdvance(double& outL, double& outR);
 
+    // Block interface. Voices render a whole block into per-route buffers and
+    // the graph then consumes them, which keeps a voice's state in L1 for the
+    // length of a block instead of being evicted by every other voice on every
+    // sample.
+    static constexpr int kMaxBlock = 1024;
+    void beginBlock(int frames);
+    void pushBlock(const Route& route, const double* l, const double* r, int frames);
+
+    // Mono source with constant pan gains -- what a voice actually produces,
+    // since zyn pans every oscillator centre for the life of a note.
+    void pushBlockMono(const Route& route, const double* mono,
+                       double gainL, double gainR, int frames);
+    void mixBlock(float* outL, float* outR, int frames);
+
     // Generates any outstanding reverb impulses. Allocates: never call from
     // the audio thread. A reverb is silent until this has run for it.
     void buildPending();
@@ -96,6 +110,11 @@ private:
     size_t nextVerb_ = 0;
 
     double masterL_ = 0.0, masterR_ = 0.0;
+
+    // Per-node input buffers for the block interface, sized in prepare().
+    std::vector<std::vector<double>> delayInL_, delayInR_;
+    std::vector<std::vector<double>> verbInL_, verbInR_;
+    std::vector<double> blockMasterL_, blockMasterR_;
 
     struct Pending { int slot; double duration; double decay; uint32_t seed; };
     std::vector<Pending> pending_;

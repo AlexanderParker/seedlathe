@@ -109,6 +109,13 @@ void SharedFxRack::prepare(double sampleRate) {
     nextDelay_ = 0;
     nextVerb_ = 0;
     masterL_ = masterR_ = 0.0;
+
+    delayInL_.assign(delays_.size(), std::vector<double>(kMaxBlock, 0.0));
+    delayInR_.assign(delays_.size(), std::vector<double>(kMaxBlock, 0.0));
+    verbInL_.assign(verbs_.size(), std::vector<double>(kMaxBlock, 0.0));
+    verbInR_.assign(verbs_.size(), std::vector<double>(kMaxBlock, 0.0));
+    blockMasterL_.assign(kMaxBlock, 0.0);
+    blockMasterR_.assign(kMaxBlock, 0.0);
 }
 
 void SharedFxRack::reset() {
@@ -245,6 +252,129 @@ void SharedFxRack::prewarm(const Instrument& inst) {
     for (int i = 0; i < inst.oscCount; ++i)
         acquireRoute(inst.oscs[static_cast<size_t>(i)]);
     buildPending();
+}
+
+void SharedFxRack::beginBlock(int frames) {
+    const size_t n = static_cast<size_t>(frames);
+    for (size_t i = 0; i < delays_.size(); ++i) {
+        if (!delayLive_[i]) continue;
+        std::fill_n(delayInL_[i].begin(), n, 0.0);
+        std::fill_n(delayInR_[i].begin(), n, 0.0);
+    }
+    for (size_t i = 0; i < verbs_.size(); ++i) {
+        if (!verbLive_[i]) continue;
+        std::fill_n(verbInL_[i].begin(), n, 0.0);
+        std::fill_n(verbInR_[i].begin(), n, 0.0);
+    }
+    std::fill_n(blockMasterL_.begin(), n, 0.0);
+    std::fill_n(blockMasterR_.begin(), n, 0.0);
+}
+
+void SharedFxRack::pushBlock(const Route& route, const double* l, const double* r,
+                             int frames) {
+    const size_t n = static_cast<size_t>(frames);
+
+    if (route.delaySlot >= 0) {
+        double* __restrict dl = delayInL_[static_cast<size_t>(route.delaySlot)].data();
+        double* __restrict dr = delayInR_[static_cast<size_t>(route.delaySlot)].data();
+        for (size_t i = 0; i < n; ++i) { dl[i] += l[i]; dr[i] += r[i]; }
+
+        // zyn connects the panner to BOTH the delay and a dry gain of 1.0 when
+        // a delay exists, and both feed the reverb.
+        if (route.verbSlot >= 0) {
+            double* __restrict vl = verbInL_[static_cast<size_t>(route.verbSlot)].data();
+            double* __restrict vr = verbInR_[static_cast<size_t>(route.verbSlot)].data();
+            for (size_t i = 0; i < n; ++i) { vl[i] += l[i]; vr[i] += r[i]; }
+        } else {
+            for (size_t i = 0; i < n; ++i) { blockMasterL_[i] += l[i]; blockMasterR_[i] += r[i]; }
+        }
+    } else if (route.verbSlot >= 0) {
+        double* __restrict vl = verbInL_[static_cast<size_t>(route.verbSlot)].data();
+        double* __restrict vr = verbInR_[static_cast<size_t>(route.verbSlot)].data();
+        for (size_t i = 0; i < n; ++i) { vl[i] += l[i]; vr[i] += r[i]; }
+    } else {
+        for (size_t i = 0; i < n; ++i) { blockMasterL_[i] += l[i]; blockMasterR_[i] += r[i]; }
+    }
+}
+
+void SharedFxRack::pushBlockMono(const Route& route, const double* mono,
+                                 double gainL, double gainR, int frames) {
+    const size_t n = static_cast<size_t>(frames);
+
+    auto addTo = [&](double* __restrict dl, double* __restrict dr) {
+        for (size_t i = 0; i < n; ++i) {
+            dl[i] += mono[i] * gainL;
+            dr[i] += mono[i] * gainR;
+        }
+    };
+
+    if (route.delaySlot >= 0) {
+        addTo(delayInL_[static_cast<size_t>(route.delaySlot)].data(),
+              delayInR_[static_cast<size_t>(route.delaySlot)].data());
+        // zyn connects the panner to BOTH the delay and a dry gain of 1.0 when
+        // a delay exists, and both feed the reverb.
+        if (route.verbSlot >= 0)
+            addTo(verbInL_[static_cast<size_t>(route.verbSlot)].data(),
+                  verbInR_[static_cast<size_t>(route.verbSlot)].data());
+        else
+            addTo(blockMasterL_.data(), blockMasterR_.data());
+    } else if (route.verbSlot >= 0) {
+        addTo(verbInL_[static_cast<size_t>(route.verbSlot)].data(),
+              verbInR_[static_cast<size_t>(route.verbSlot)].data());
+    } else {
+        addTo(blockMasterL_.data(), blockMasterR_.data());
+    }
+}
+
+void SharedFxRack::mixBlock(float* outL, float* outR, int frames) {
+    const size_t n = static_cast<size_t>(frames);
+
+    // Delays first, then their outputs feed the reverbs, then the reverbs sum
+    // to master -- the same ordering as the per-sample path, just walked over
+    // contiguous buffers one node at a time.
+    for (size_t d = 0; d < delays_.size(); ++d) {
+        if (!delayLive_[d]) continue;
+        WaDelay& node = delays_[d];
+        const double* __restrict il = delayInL_[d].data();
+        const double* __restrict ir = delayInR_[d].data();
+
+        for (size_t i = 0; i < n; ++i) {
+            node.addInput(il[i], ir[i]);
+            node.advance();
+            const double ol = node.outL(), orr = node.outR();
+            bool routed = false;
+            for (const auto& e : edges_) {
+                if (e.delaySlot != static_cast<int>(d)) continue;
+                routed = true;
+                if (e.verbSlot >= 0) {
+                    verbInL_[static_cast<size_t>(e.verbSlot)][i] += ol;
+                    verbInR_[static_cast<size_t>(e.verbSlot)][i] += orr;
+                } else {
+                    blockMasterL_[i] += ol;
+                    blockMasterR_[i] += orr;
+                }
+            }
+            if (!routed) { blockMasterL_[i] += ol; blockMasterR_[i] += orr; }
+        }
+    }
+
+    for (size_t v = 0; v < verbs_.size(); ++v) {
+        if (!verbLive_[v]) continue;
+        WaConvolver& node = verbs_[v];
+        const double* __restrict il = verbInL_[v].data();
+        const double* __restrict ir = verbInR_[v].data();
+        for (size_t i = 0; i < n; ++i) {
+            node.addInput(il[i], ir[i]);
+            node.advance();
+            blockMasterL_[i] += node.outL();
+            blockMasterR_[i] += node.outR();
+        }
+    }
+
+    for (size_t i = 0; i < n; ++i) {
+        outL[i] = static_cast<float>(blockMasterL_[i]);
+        outR[i] = static_cast<float>(blockMasterR_[i]);
+    }
 }
 
 void SharedFxRack::buildPending() {
