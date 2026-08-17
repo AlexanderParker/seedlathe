@@ -22,6 +22,14 @@ public:
     void cancelScheduledValues(double t);
 
     double valueAt(double t) const;
+
+    // Incremental evaluation for the render loop. beginStepping() resolves the
+    // first segment; nextValue() then returns one sample and advances. This
+    // replaces a timeline search plus a division per call with an add -- a
+    // voice reads three or four envelopes per oscillator per sample, so at
+    // polyphony that was about a third of the whole voice path.
+    void beginStepping(double sampleRate);
+    double nextValue();
     double staticValue() const { return static_; }
     bool hasEvents() const { return count_ > 0; }
 
@@ -40,6 +48,14 @@ private:
     // Mutable because valueAt is logically const.
     mutable size_t cursor_ = 0;
     mutable double lastQuery_ = 0.0;
+
+    // Stepping state.
+    double sr_ = 48000.0;
+    size_t stepSeg_ = 0;
+    long long stepRemaining_ = -1;   // negative means "hold forever"
+    double stepValue_ = 0.0;
+    double stepDelta_ = 0.0;
+    void enterSegment(size_t i);
 };
 
 } // namespace sl

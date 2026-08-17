@@ -304,3 +304,42 @@ TEST_CASE("worst-case instruments", "[.perf]") {
     }
     REQUIRE(true);
 }
+
+#include "webaudio/WaParam.h"
+
+TEST_CASE("voice internals breakdown", "[.perf]") {
+    const double sr = 48000.0;
+    const int n = static_cast<int>(sr);
+
+    {
+        sl::WaParam p;
+        p.reset(0.0);
+        p.setValueAtTime(0.0, 0.0);
+        p.linearRampToValueAtTime(1.0, 0.05);
+        p.linearRampToValueAtTime(0.6, 0.2);
+        p.linearRampToValueAtTime(0.3, 0.7);
+        p.linearRampToValueAtTime(0.0, 1.0);
+        volatile double sink = 0.0;
+        const double cpu = secondsFor([&] {
+            for (int i = 0; i < n; ++i) sink += p.valueAt(double(i) / sr);
+        });
+        std::printf("  WaParam::valueAt                 %8.1f x realtime\n", 1.0 / cpu);
+    }
+
+    // A voice reads three or four envelopes per oscillator per sample, so the
+    // per-call cost is multiplied by roughly 4 * oscillators * voices.
+    {
+        sl::WaParam p;
+        p.reset(0.0);
+        p.setValueAtTime(0.0, 0.0);
+        p.linearRampToValueAtTime(1.0, 0.05);
+        p.linearRampToValueAtTime(0.6, 0.2);
+        volatile double sink = 0.0;
+        const double cpu = secondsFor([&] {
+            for (int i = 0; i < n; ++i)
+                for (int k = 0; k < 48; ++k) sink += p.valueAt(double(i) / sr);
+        });
+        std::printf("  WaParam x48 (8 voices, 2 oscs)   %8.1f x realtime\n", 1.0 / cpu);
+    }
+    REQUIRE(true);
+}

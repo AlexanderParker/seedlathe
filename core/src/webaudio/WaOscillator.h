@@ -18,7 +18,7 @@ class WaOscillator {
 public:
     void prepare(double sampleRate);
     void setType(Waveform w);
-    void resetPhase() { phase_ = 0.0; }
+    void resetPhase() { phase_ = 0.0; lastFreq_ = -1.0; }
     void setPhase(double cycles) { phase_ = cycles - static_cast<int>(cycles); }
 
     // freqHz may change every sample: zyn drives it from pitch envelopes, pitch
@@ -30,6 +30,11 @@ private:
     const WaveTables* tables_ = nullptr;
     double sampleRate_ = 48000.0;
     double phase_ = 0.0;
+
+    // Cached wavetable range selection, invalidated when the frequency moves.
+    double lastFreq_ = -1.0;
+    unsigned rangeI1_ = 0, rangeI2_ = 0;
+    double rangeInterp_ = 0.0;
 };
 
 // The 2 s noise buffer zyn creates once and shares across every voice and

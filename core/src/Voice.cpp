@@ -67,6 +67,7 @@ void Voice::noteOn(const Instrument& inst, int note, double gain, bool sustained
     endTime_ = 0.0;
     startStamp_ = ++g_stamp;
     coeffCounter_ = 0;
+    WaPanner::gains(0.0, panL_, panR_);
 
     const int n = inst_.oscCount;
     // zyn: voiceGain = 1 / (notes * oscs), and layer.gain = 0.5 * gain.
@@ -142,6 +143,11 @@ void Voice::noteOn(const Instrument& inst, int note, double gain, bool sustained
             s.fmFreq = std::clamp(c.fm.frequency * s.baseFreq, -22050.0, 22050.0);
             s.fmDepth = c.fm.depth;
         }
+
+        s.gainEnv.beginStepping(sampleRate_);
+        s.filterEnv.beginStepping(sampleRate_);
+        s.qEnv.beginStepping(sampleRate_);
+        if (s.hasPitchEnv) s.pitchEnv.beginStepping(sampleRate_);
 
         s.route = rack_->acquireRoute(c);
         s.out = 0.0;
@@ -224,7 +230,7 @@ void Voice::process() {
             sample = s.noise.render();
         } else {
             // Base frequency, or the pitch envelope's value when it replaces it.
-            double freq = s.hasPitchEnv ? s.pitchEnv.valueAt(t_) : s.baseFreq;
+            double freq = s.hasPitchEnv ? s.pitchEnv.nextValue() : s.baseFreq;
 
             // Connected AudioParam inputs sum on top of the automation value.
             if (s.hasPLfo) freq += s.pLfo.render(inst_.oscs[static_cast<size_t>(i)]
@@ -244,9 +250,9 @@ void Voice::process() {
 
         if (s.useShaper) sample = s.shaper.process(sample);
 
-        double cutoff = s.filterEnv.valueAt(t_);
+        double cutoff = s.filterEnv.nextValue();
         if (s.hasFLfo) cutoff += s.fLfo.render(c.fLfo.frequency) * s.fLfoDepth;
-        const double q = s.qEnv.valueAt(t_);
+        const double q = s.qEnv.nextValue();
         // Coefficients are refreshed every kCoeffInterval samples rather than
         // every sample. Recomputing them costs about seven times the filtering
         // itself -- two transcendentals plus a pow -- and at polyphony that
@@ -266,17 +272,18 @@ void Voice::process() {
         s.filter.setCoefficients(FilterType::Lowpass, cutoff, q, 0.0);
         sample = s.filter.process(sample);
 
-        double g = s.gainEnv.valueAt(t_);
+        double g = s.gainEnv.nextValue();
         if (s.hasGLfo) g += s.gLfo.render(c.gLfo.frequency) * s.gLfoDepth;
         g *= releaseMul;
         sample *= g;
 
         peak = std::max(peak, std::abs(sample));
 
-        // zyn's Z.play uses pan 0, so the panner is centred equal-power.
-        double l, r;
-        WaPanner::pan(sample, 0.0, l, r);
-        rack_->push(s.route, l, r);
+        // zyn's Z.play uses pan 0, so the panner is centred equal-power. The
+        // gains are constant for the life of the note and are resolved in
+        // noteOn: computing them here meant two libm calls per oscillator per
+        // sample to arrive at a fixed 0.7071.
+        rack_->push(s.route, sample * panL_, sample * panR_);
     }
 
     // Advance the FM matrix modulation delays with this sample's outputs.
@@ -298,6 +305,7 @@ void VoicePool::prepare(double sampleRate, int maxVoices, SharedFxRack* rack) {
     sampleRate_ = sampleRate;
     rack_ = rack;
     voices_.resize(static_cast<size_t>(std::max(1, maxVoices)));
+    active_.reserve(voices_.size());
     for (auto& v : voices_) v.prepare(sampleRate, rack);
 }
 
@@ -326,8 +334,15 @@ void VoicePool::allNotesOff() {
 }
 
 void VoicePool::render(float* left, float* right, int frames) {
+    // Gather the active voices once per block instead of testing all of them
+    // on every sample. With a 32-voice pool and 8 notes held, that removed
+    // about a million wasted calls a second.
+    active_.clear();
+    for (auto& v : voices_)
+        if (v.active()) active_.push_back(&v);
+
     for (int i = 0; i < frames; ++i) {
-        for (auto& v : voices_) v.process();
+        for (Voice* v : active_) v->process();
         double l = 0.0, r = 0.0;
         rack_->mixAndAdvance(l, r);
         left[i] = static_cast<float>(l);

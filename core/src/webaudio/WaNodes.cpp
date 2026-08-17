@@ -78,12 +78,12 @@ void WaDelay::advance() {
 
 // -------------------------------------------------------------- WaPanner
 
-void WaPanner::pan(double in, double p, double& l, double& r) {
+void WaPanner::gains(double p, double& gainL, double& gainR) {
     if (p < -1.0) p = -1.0;
     if (p > 1.0) p = 1.0;
     const double x = (p + 1.0) * kPi / 4.0;
-    l = in * std::cos(x);
-    r = in * std::sin(x);
+    gainL = std::cos(x);
+    gainR = std::sin(x);
 }
 
 // -------------------------------------------------------------- WaShaper

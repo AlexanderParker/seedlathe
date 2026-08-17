@@ -22,6 +22,48 @@ void WaParam::cancelScheduledValues(double t) {
     if (cursor_ >= count_) cursor_ = count_ ? count_ - 1 : 0;
 }
 
+void WaParam::enterSegment(size_t i) {
+    stepSeg_ = i;
+    if (i + 1 >= count_) {
+        // Past the last event the value holds.
+        stepValue_ = count_ ? events_[count_ - 1].value : static_;
+        stepDelta_ = 0.0;
+        stepRemaining_ = -1;
+        return;
+    }
+    const Event& prev = events_[i];
+    const Event& next = events_[i + 1];
+    long long samples = static_cast<long long>((next.time - prev.time) * sr_ + 0.5);
+    if (samples < 1) samples = 1;
+
+    stepValue_ = prev.value;
+    // A setValueAtTime is a step, not a ramp: hold, then jump at the boundary.
+    stepDelta_ = (next.kind == Kind::SetValue)
+                     ? 0.0
+                     : (next.value - prev.value) / double(samples);
+    stepRemaining_ = samples;
+}
+
+void WaParam::beginStepping(double sampleRate) {
+    sr_ = sampleRate;
+    if (count_ == 0) {
+        stepValue_ = static_;
+        stepDelta_ = 0.0;
+        stepRemaining_ = -1;
+        return;
+    }
+    enterSegment(0);
+}
+
+double WaParam::nextValue() {
+    const double v = stepValue_;
+    if (stepRemaining_ < 0) return v;      // holding
+
+    stepValue_ += stepDelta_;
+    if (--stepRemaining_ <= 0) enterSegment(stepSeg_ + 1);
+    return v;
+}
+
 double WaParam::valueAt(double t) const {
     if (count_ == 0) return static_;
 

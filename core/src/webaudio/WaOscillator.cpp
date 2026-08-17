@@ -114,11 +114,16 @@ const WaveTables& tablesFor(Waveform w, double sampleRate) {
     return cache[static_cast<size_t>(idx >= 0 && idx < 4 ? idx : 0)];
 }
 
+// size is always a power of two (2048, 4096 or 16384), so the wrap is a mask
+// rather than two integer divisions, and pos is non-negative so the fractional
+// part needs no floor.
 float readTable(const std::vector<float>& tab, double phase, unsigned size) {
     const double pos = phase * double(size);
-    const unsigned i0 = static_cast<unsigned>(pos) % size;
-    const unsigned i1 = (i0 + 1u) % size;
-    const double frac = pos - std::floor(pos);
+    const unsigned ip = static_cast<unsigned>(pos);
+    const unsigned mask = size - 1u;
+    const unsigned i0 = ip & mask;
+    const unsigned i1 = (ip + 1u) & mask;
+    const double frac = pos - double(ip);
     return static_cast<float>(tab[i0] + (tab[i1] - tab[i0]) * frac);
 }
 
@@ -150,23 +155,31 @@ double WaOscillator::render(double freqHz) {
     //   ratio  = f / lowestFundamental   (0.5 when f <= 0)
     //   cents  = log2(ratio) * 1200
     //   range  = 1 + cents / centsPerRange
-    const double absFreq = std::abs(freqHz);
-    const double ratio = absFreq > 0.0 ? absFreq / t.lowestFundamental : 0.5;
-    const double pitchRange = 1.0 + (std::log2(ratio) * 1200.0) / kCentsPerRange;
+    //
+    // log2 is a libm call, and for any oscillator that is not being modulated
+    // the frequency is identical sample after sample, so the result is cached
+    // and only recomputed when the frequency actually moves.
+    if (freqHz != lastFreq_) {
+        lastFreq_ = freqHz;
+        const double absFreq = std::abs(freqHz);
+        const double ratio = absFreq > 0.0 ? absFreq / t.lowestFundamental : 0.5;
+        const double pitchRange = 1.0 + (std::log2(ratio) * 1200.0) / kCentsPerRange;
 
-    unsigned i1;
-    double interp;
-    if (pitchRange <= 0.0) {
-        i1 = 0;
-        interp = 0.0;
-    } else if (pitchRange >= double(t.ranges - 1)) {
-        i1 = t.ranges - 1;
-        interp = 0.0;
-    } else {
-        i1 = static_cast<unsigned>(pitchRange);
-        interp = pitchRange - double(i1);
+        if (pitchRange <= 0.0) {
+            rangeI1_ = 0;
+            rangeInterp_ = 0.0;
+        } else if (pitchRange >= double(t.ranges - 1)) {
+            rangeI1_ = t.ranges - 1;
+            rangeInterp_ = 0.0;
+        } else {
+            rangeI1_ = static_cast<unsigned>(pitchRange);
+            rangeInterp_ = pitchRange - double(rangeI1_);
+        }
+        rangeI2_ = rangeI1_ + 1u < t.ranges ? rangeI1_ + 1u : rangeI1_;
     }
-    const unsigned i2 = i1 + 1u < t.ranges ? i1 + 1u : i1;
+    const unsigned i1 = rangeI1_;
+    const unsigned i2 = rangeI2_;
+    const double interp = rangeInterp_;
 
     const double a = readTable(t.table[i1], phase_, t.size);
     const double b = readTable(t.table[i2], phase_, t.size);

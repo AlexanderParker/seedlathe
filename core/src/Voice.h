@@ -90,6 +90,9 @@ private:
     // Filter coefficients are refreshed on this cadence, not every sample.
     static constexpr int kCoeffInterval = 8;
     int coeffCounter_ = 0;
+
+    // Pan is fixed for the life of a note, so its gains are resolved once.
+    double panL_ = 0.7071067811865476, panR_ = 0.7071067811865476;
 };
 
 // Fixed pool with stealing. zyn creates nodes without bound, which is fine in
@@ -108,6 +111,7 @@ public:
 
 private:
     std::vector<Voice> voices_;
+    std::vector<Voice*> active_;   // rebuilt per block, never resized in render
     SharedFxRack* rack_ = nullptr;
     double sampleRate_ = 48000.0;
 };

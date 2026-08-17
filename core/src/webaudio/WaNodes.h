@@ -46,9 +46,20 @@ private:
 };
 
 // StereoPannerNode's equal-power law for a mono input.
+//
+// Note gains(), not pan(): the pan position is constant for the life of a note,
+// so resolving it once beats calling cos and sin per oscillator per sample --
+// which is what pan() was doing to compute a fixed 0.7071.
 class WaPanner {
 public:
-    static void pan(double in, double p, double& l, double& r);
+    static void gains(double p, double& gainL, double& gainR);
+
+    static void pan(double in, double p, double& l, double& r) {
+        double gl, gr;
+        gains(p, gl, gr);
+        l = in * gl;
+        r = in * gr;
+    }
 };
 
 // WaveShaperNode plus zyn's getDistCurve.
