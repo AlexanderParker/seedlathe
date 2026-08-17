@@ -9,6 +9,7 @@ add_library(sl_core STATIC
   src/SharedFxRack.cpp
   src/Voice.cpp
   src/OfflineRender.cpp
+  src/Analysis.cpp
 )
 
 target_include_directories(sl_core

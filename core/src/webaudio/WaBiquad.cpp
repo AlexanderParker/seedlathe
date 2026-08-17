@@ -25,94 +25,129 @@ void WaBiquad::setSilence() {
     b0_ = 0.0; b1_ = 0.0; b2_ = 0.0; a1_ = 0.0; a2_ = 0.0;
 }
 
+// Port of Blink's Biquad::Set*Params. These are NOT the textbook RBJ
+// formulas, and three of the differences change the sound materially:
+//
+//  1. For lowpass and highpass, Web Audio's Q is in DECIBELS -- Blink applies
+//     pow10(Q/20) before using it. It is linear only for bandpass, peaking,
+//     notch and allpass. zyn drives Q from an envelope scaled to 30, so
+//     treating that as linear gets the resonance badly wrong in the mid-range.
+//  2. The shelf filters ignore Q entirely: with Blink's fixed S = 1, alpha
+//     reduces to 0.5*sin(w0)*sqrt(2).
+//  3. Every type has its own Q == 0 and edge-frequency behaviour -- passthrough
+//     for bandpass, A^2 for peaking, -1 for allpass, silence for notch. zyn's Q
+//     envelope starts every note at 0, so these are hit constantly rather than
+//     being corner cases.
 void WaBiquad::setCoefficients(FilterType type, double freqHz, double q, double gainDb) {
     const double nyquist = sampleRate_ * 0.5;
-
-    // Blink clamps the normalised frequency to [0, 1].
     double nf = freqHz / nyquist;
     nf = nf < 0.0 ? 0.0 : (nf > 1.0 ? 1.0 : nf);
 
-    // Degenerate endpoints. These are reached on every note, not rarely: the
-    // filter envelope starts at 0 Hz and ramps to 20 kHz.
-    if (nf <= 0.0) {
-        switch (type) {
-        case FilterType::Lowpass:
-        case FilterType::Bandpass:
-            setSilence();
-            return;
-        default:
-            // Highpass, allpass, shelves and peaking all pass through at DC.
-            setPassthrough();
-            return;
-        }
-    }
-    if (nf >= 1.0) {
-        switch (type) {
-        case FilterType::Highpass:
-        case FilterType::Bandpass:
-            setSilence();
-            return;
-        default:
-            setPassthrough();
-            return;
-        }
-    }
-
-    const double w0 = kPi * nf;
-    const double cosw0 = std::cos(w0);
-    const double sinw0 = std::sin(w0);
-    const double qClamped = std::max(q, 1e-4);
-    const double alpha = sinw0 / (2.0 * qClamped);
     const double A = std::pow(10.0, gainDb / 40.0);   // shelf and peaking only
-
     double b0 = 1.0, b1 = 0.0, b2 = 0.0, a0 = 1.0, a1 = 0.0, a2 = 0.0;
 
+    auto normalise = [&]() {
+        if (a0 == 0.0 || !std::isfinite(a0)) { setPassthrough(); return; }
+        b0_ = b0 / a0; b1_ = b1 / a0; b2_ = b2 / a0;
+        a1_ = a1 / a0; a2_ = a2 / a0;
+    };
+
     switch (type) {
-    case FilterType::Lowpass:
-        b0 = (1.0 - cosw0) * 0.5; b1 = 1.0 - cosw0; b2 = b0;
-        a0 = 1.0 + alpha; a1 = -2.0 * cosw0; a2 = 1.0 - alpha;
+    case FilterType::Lowpass: {
+        if (nf == 1.0) { setPassthrough(); return; }
+        if (nf <= 0.0) { setSilence(); return; }
+        const double res = std::pow(10.0, q / 20.0);       // Q is in dB here
+        const double theta = kPi * nf;
+        const double alpha = std::sin(theta) / (2.0 * res);
+        const double cosw = std::cos(theta);
+        const double beta = (1.0 - cosw) * 0.5;
+        b0 = beta; b1 = 2.0 * beta; b2 = beta;
+        a0 = 1.0 + alpha; a1 = -2.0 * cosw; a2 = 1.0 - alpha;
         break;
-    case FilterType::Highpass:
-        b0 = (1.0 + cosw0) * 0.5; b1 = -(1.0 + cosw0); b2 = b0;
-        a0 = 1.0 + alpha; a1 = -2.0 * cosw0; a2 = 1.0 - alpha;
+    }
+    case FilterType::Highpass: {
+        if (nf == 1.0) { setSilence(); return; }
+        if (nf <= 0.0) { setPassthrough(); return; }
+        const double res = std::pow(10.0, q / 20.0);       // Q is in dB here
+        const double theta = kPi * nf;
+        const double alpha = std::sin(theta) / (2.0 * res);
+        const double cosw = std::cos(theta);
+        const double beta = (1.0 + cosw) * 0.5;
+        b0 = beta; b1 = -2.0 * beta; b2 = beta;
+        a0 = 1.0 + alpha; a1 = -2.0 * cosw; a2 = 1.0 - alpha;
         break;
-    case FilterType::Bandpass:                        // constant 0 dB peak gain
+    }
+    case FilterType::Bandpass: {
+        const double freq = std::max(0.0, nf);
+        const double qq = std::max(0.0, q);
+        if (!(freq > 0.0 && freq < 1.0)) { setSilence(); return; }
+        if (qq <= 0.0) { setPassthrough(); return; }       // NOT a narrow band
+        const double w0 = kPi * freq;
+        const double alpha = std::sin(w0) / (2.0 * qq);
+        const double k = std::cos(w0);
         b0 = alpha; b1 = 0.0; b2 = -alpha;
-        a0 = 1.0 + alpha; a1 = -2.0 * cosw0; a2 = 1.0 - alpha;
+        a0 = 1.0 + alpha; a1 = -2.0 * k; a2 = 1.0 - alpha;
         break;
+    }
     case FilterType::Lowshelf: {
-        const double s = 2.0 * std::sqrt(A) * alpha;
-        b0 =       A * ((A + 1.0) - (A - 1.0) * cosw0 + s);
-        b1 = 2.0 * A * ((A - 1.0) - (A + 1.0) * cosw0);
-        b2 =       A * ((A + 1.0) - (A - 1.0) * cosw0 - s);
-        a0 =            (A + 1.0) + (A - 1.0) * cosw0 + s;
-        a1 = -2.0 *    ((A - 1.0) + (A + 1.0) * cosw0);
-        a2 =            (A + 1.0) + (A - 1.0) * cosw0 - s;
+        if (nf == 1.0) { b0_ = A * A; b1_ = b2_ = a1_ = a2_ = 0.0; return; }
+        if (nf <= 0.0) { setPassthrough(); return; }
+        const double w0 = kPi * nf;
+        // Blink fixes S = 1, so this reduces to 0.5*sin(w0)*sqrt(2) and Q is
+        // not involved at all.
+        const double alpha = 0.5 * std::sin(w0) * std::sqrt(2.0);
+        const double k = std::cos(w0);
+        const double k2 = 2.0 * std::sqrt(A) * alpha;
+        const double ap1 = A + 1.0, am1 = A - 1.0;
+        b0 = A * (ap1 - am1 * k + k2);
+        b1 = 2.0 * A * (am1 - ap1 * k);
+        b2 = A * (ap1 - am1 * k - k2);
+        a0 = ap1 + am1 * k + k2;
+        a1 = -2.0 * (am1 + ap1 * k);
+        a2 = ap1 + am1 * k - k2;
         break;
     }
     case FilterType::Highshelf: {
-        const double s = 2.0 * std::sqrt(A) * alpha;
-        b0 =        A * ((A + 1.0) + (A - 1.0) * cosw0 + s);
-        b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * cosw0);
-        b2 =        A * ((A + 1.0) + (A - 1.0) * cosw0 - s);
-        a0 =             (A + 1.0) - (A - 1.0) * cosw0 + s;
-        a1 =  2.0 *     ((A - 1.0) - (A + 1.0) * cosw0);
-        a2 =             (A + 1.0) - (A - 1.0) * cosw0 - s;
+        if (nf == 1.0) { setPassthrough(); return; }
+        if (nf <= 0.0) { b0_ = A * A; b1_ = b2_ = a1_ = a2_ = 0.0; return; }
+        const double w0 = kPi * nf;
+        const double alpha = 0.5 * std::sin(w0) * std::sqrt(2.0);
+        const double k = std::cos(w0);
+        const double k2 = 2.0 * std::sqrt(A) * alpha;
+        const double ap1 = A + 1.0, am1 = A - 1.0;
+        b0 = A * (ap1 + am1 * k + k2);
+        b1 = -2.0 * A * (am1 + ap1 * k);
+        b2 = A * (ap1 + am1 * k - k2);
+        a0 = ap1 - am1 * k + k2;
+        a1 = 2.0 * (am1 - ap1 * k);
+        a2 = ap1 - am1 * k - k2;
         break;
     }
-    case FilterType::Peaking:
-        b0 = 1.0 + alpha * A; b1 = -2.0 * cosw0; b2 = 1.0 - alpha * A;
-        a0 = 1.0 + alpha / A; a1 = -2.0 * cosw0; a2 = 1.0 - alpha / A;
+    case FilterType::Peaking: {
+        const double qq = std::max(0.0, q);
+        if (!(nf > 0.0 && nf < 1.0)) { setPassthrough(); return; }
+        if (qq <= 0.0) { b0_ = A * A; b1_ = b2_ = a1_ = a2_ = 0.0; return; }
+        const double w0 = kPi * nf;
+        const double alpha = std::sin(w0) / (2.0 * qq);
+        const double k = std::cos(w0);
+        b0 = 1.0 + alpha * A; b1 = -2.0 * k; b2 = 1.0 - alpha * A;
+        a0 = 1.0 + alpha / A; a1 = -2.0 * k; a2 = 1.0 - alpha / A;
         break;
-    case FilterType::Allpass:
-        b0 = 1.0 - alpha; b1 = -2.0 * cosw0; b2 = 1.0 + alpha;
-        a0 = 1.0 + alpha; a1 = -2.0 * cosw0; a2 = 1.0 - alpha;
+    }
+    case FilterType::Allpass: {
+        const double qq = std::max(0.0, q);
+        if (!(nf > 0.0 && nf < 1.0)) { setPassthrough(); return; }
+        if (qq <= 0.0) { b0_ = -1.0; b1_ = b2_ = a1_ = a2_ = 0.0; return; }
+        const double w0 = kPi * nf;
+        const double alpha = std::sin(w0) / (2.0 * qq);
+        const double k = std::cos(w0);
+        b0 = 1.0 - alpha; b1 = -2.0 * k; b2 = 1.0 + alpha;
+        a0 = 1.0 + alpha; a1 = -2.0 * k; a2 = 1.0 - alpha;
         break;
+    }
     }
 
-    if (a0 == 0.0 || !std::isfinite(a0)) { setPassthrough(); return; }
-    b0_ = b0 / a0; b1_ = b1 / a0; b2_ = b2 / a0;
-    a1_ = a1 / a0; a2_ = a2 / a0;
+    normalise();
 }
 
 double WaBiquad::process(double x) {

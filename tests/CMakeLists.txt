@@ -12,6 +12,8 @@ add_executable(sl_tests
   test_sharedfxrack.cpp
   test_voice.cpp
   test_offlinerender.cpp
+  test_analysis.cpp
+  test_fidelity.cpp
 )
 
 target_link_libraries(sl_tests PRIVATE sl_core Catch2::Catch2WithMain)

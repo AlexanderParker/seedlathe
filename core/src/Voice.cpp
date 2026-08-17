@@ -246,7 +246,15 @@ void Voice::process() {
         double cutoff = s.filterEnv.valueAt(t_);
         if (s.hasFLfo) cutoff += s.fLfo.render(c.fLfo.frequency) * s.fLfoDepth;
         const double q = s.qEnv.valueAt(t_);
-        s.filter.setCoefficients(c.filterType, cutoff, q, 0.0);
+        // ALWAYS lowpass, regardless of osc.filterType. zyn generates a
+        // filterType into every oscillator and then never assigns it to the
+        // node -- render() creates the BiquadFilterNode and sets only .Q and
+        // .frequency, so every filter in zyn is the Web Audio default, which is
+        // lowpass. Honouring filterType here would mis-filter the ~86% of
+        // oscillators whose generated type is something else. The field is
+        // still carried in the data model because the search scorer reads it,
+        // exactly like filterQ.
+        s.filter.setCoefficients(FilterType::Lowpass, cutoff, q, 0.0);
         sample = s.filter.process(sample);
 
         double g = s.gainEnv.valueAt(t_);
