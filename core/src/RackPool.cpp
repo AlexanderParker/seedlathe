@@ -30,7 +30,17 @@ void RackPool::audioBlockStarted(VoicePool& pool) {
     const int retire = retireRequest_.load(std::memory_order_acquire);
     if (retire >= 0) {
         SharedFxRack* r = racks_[static_cast<size_t>(retire)].get();
-        if (r != liveRack()) pool.killVoicesUsing(r);
+        if (r != liveRack()) {
+            pool.killVoicesUsing(r);
+            // Killing the voices is not enough on its own: the reverb tail
+            // outlives them by seconds and keeps the rack ringing, so it would
+            // stay ineligible and every rebuild would go on being refused.
+            // reset() only zeroes buffers -- it never reallocates -- so it is
+            // safe here. The tail is cut, but this only runs when every rack is
+            // busy, which means the user is changing patches faster than the
+            // tails decay and is not listening to this one any more.
+            r->reset();
+        }
         retireRequest_.store(-1, std::memory_order_release);
     }
 }
@@ -48,6 +58,12 @@ bool RackPool::rebuild(const Instrument& inst, VoicePool& pool) {
         const int c = (live + i) % n;
         if (c == live) continue;
         if (pool.rackInUse(racks_[static_cast<size_t>(c)].get())) continue;
+        // A rack with no voices left can still be ringing, and VoicePool::render
+        // mixes every ringing rack so the tail survives the note. Rebuilding one
+        // reallocates the buffers that mix is walking -- an access violation
+        // after a handful of preset loads. Voice ownership alone does not cover
+        // this: the tail outlives the voice by design.
+        if (racks_[static_cast<size_t>(c)]->ringing()) continue;
         if (wasLive_[static_cast<size_t>(c)] &&
             freeSince_[static_cast<size_t>(c)] + 2 > epoch) continue;
         target = c;

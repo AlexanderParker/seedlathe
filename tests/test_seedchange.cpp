@@ -81,6 +81,66 @@ TEST_CASE("a rack is never rebuilt while a voice is bound to it") {
     }
 }
 
+// Regression test for the crash reported after loading a few presets.
+//
+// The reverb-tail fix made VoicePool mix every RINGING rack, not just the ones
+// sounding voices reference. RackPool did not know that: it gated rebuilds on
+// voice ownership alone, so a rack whose last voice had ended -- but whose tail
+// the audio thread was still mixing -- looked free. Rebuilding it reallocated
+// the buffers under the mix, and the plugin died with an access violation after
+// a handful of preset loads.
+//
+// The two earlier tests in this file miss it because they call render() without
+// the all-racks argument, which is exactly the path that does not mix tails.
+TEST_CASE("a rack is never rebuilt while its tail is still being mixed") {
+    // Two racks makes the choice forced: after the first rebuild there is
+    // exactly one candidate, and the test can say which one it must be.
+    sl::RackPool racks;
+    racks.prepare(48000.0, 2);
+    sl::VoicePool pool;
+    pool.prepare(48000.0, 8);
+
+    // 2.44 s reverb plus a delay.
+    const auto reverby = sl::generateInstrument(3703184240u);
+    REQUIRE(racks.rebuild(reverby, pool));
+    sl::SharedFxRack* sounded = racks.liveRack();
+
+    std::vector<float> l(256), r(256);
+    auto renderFor = [&](int blocks) {
+        for (int b = 0; b < blocks; ++b) {
+            racks.audioBlockStarted(pool);
+            pool.render(l.data(), r.data(), 256, racks.all(), racks.allCount());
+        }
+    };
+
+    pool.noteOn(sounded, reverby, 0, 1.0, true);
+    renderFor(100);
+    pool.noteOff(0);
+    renderFor(200);
+
+    REQUIRE(pool.activeCount() == 0);        // no voice owns it any more
+    REQUIRE_FALSE(pool.rackInUse(sounded));
+    REQUIRE(sounded->ringing());             // but the tail is still mixed
+
+    // Move live off the ringing rack onto the other one.
+    REQUIRE(racks.rebuild(sl::generateInstrument(1001u), pool));
+    REQUIRE(racks.liveRack() != sounded);
+    renderFor(4);
+
+    // The ringing rack is now the only candidate, and it must be refused.
+    REQUIRE_FALSE(racks.rebuild(sl::generateInstrument(1002u), pool));
+    REQUIRE(racks.liveRack() != sounded);
+
+    // Refusing forever would be its own bug: the refusal asks the audio thread
+    // to retire the oldest non-live rack, which silences the tail and frees it.
+    bool eventually = false;
+    for (int attempt = 0; attempt < 20 && !eventually; ++attempt) {
+        renderFor(4);
+        eventually = racks.rebuild(sl::generateInstrument(1003u), pool);
+    }
+    REQUIRE(eventually);
+}
+
 TEST_CASE("a reverb tail keeps sounding after the note is released") {
     // Regression: VoicePool used to mix only racks that had ACTIVE voices, so
     // the instant a voice ended its reverb and delay tails were cut dead.

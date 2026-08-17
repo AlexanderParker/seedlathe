@@ -109,8 +109,8 @@ void SharedFxRack::prepare(double sampleRate) {
     nextDelay_ = 0;
     nextVerb_ = 0;
     masterL_ = masterR_ = 0.0;
-    anyLive_ = false;
-    silentBlocks_ = 0;
+    anyLive_.store(false, std::memory_order_release);
+    silentBlocks_.store(kSilentBlocksToIdle, std::memory_order_release);
 
     delayInL_.assign(delays_.size(), std::vector<double>(kMaxBlock, 0.0));
     delayInR_.assign(delays_.size(), std::vector<double>(kMaxBlock, 0.0));
@@ -131,8 +131,8 @@ void SharedFxRack::reset() {
     nextDelay_ = 0;
     nextVerb_ = 0;
     masterL_ = masterR_ = 0.0;
-    anyLive_ = false;
-    silentBlocks_ = 0;
+    anyLive_.store(false, std::memory_order_release);
+    silentBlocks_.store(kSilentBlocksToIdle, std::memory_order_release);
 }
 
 const SharedFxRack::Entry* SharedFxRack::find(uint64_t key) const {
@@ -179,8 +179,7 @@ SharedFxRack::Route SharedFxRack::acquireRoute(const Osc& osc) {
             route.delaySlot = static_cast<int>(slot);
         }
         delayLive_[static_cast<size_t>(route.delaySlot)] = true;
-        anyLive_ = true;
-        silentBlocks_ = 0;
+        anyLive_.store(true, std::memory_order_release);
     } else {
         // zyn still caches a no-op gain node here, keyed on the whole
         // oscillator config. It is inaudible, but it occupies a cache slot and
@@ -205,8 +204,7 @@ SharedFxRack::Route SharedFxRack::acquireRoute(const Osc& osc) {
             route.verbSlot = static_cast<int>(slot);
         }
         verbLive_[static_cast<size_t>(route.verbSlot)] = true;
-        anyLive_ = true;
-        silentBlocks_ = 0;
+        anyLive_.store(true, std::memory_order_release);
     }
 
     if (route.delaySlot >= 0) addEdge(route.delaySlot, route.verbSlot);
@@ -386,7 +384,11 @@ void SharedFxRack::mixBlock(float* outL, float* outR, int frames) {
         outR[i] = static_cast<float>(r);
         if (l > 1e-7 || l < -1e-7 || r > 1e-7 || r < -1e-7) silent = false;
     }
-    silentBlocks_ = silent ? silentBlocks_ + 1 : 0;
+    // Saturating, so a rack that has been idle for hours cannot overflow the
+    // counter back below the threshold and claim to be ringing again.
+    const int prev = silentBlocks_.load(std::memory_order_relaxed);
+    silentBlocks_.store(silent ? std::min(prev + 1, kSilentBlocksToIdle) : 0,
+                        std::memory_order_release);
 }
 
 void SharedFxRack::buildPending() {
