@@ -1,17 +1,49 @@
 #include "Seedlathe.h"
 #include "IPlug_include_in_plug_src.h"
 
+#include "sl/FactoryPresets.h"
 #include "sl/InstrumentGen.h"
 
 #include <algorithm>
-#include <array>
+#include <cstdio>
 #include <pmmintrin.h>
+#include <vector>
 #include <xmmintrin.h>
+
+using seedlathe::ListControl;
+using seedlathe::SeedBoxControl;
+using seedlathe::TabBarControl;
+using seedlathe::TypeName;
 
 namespace {
 // zyn's demo maps MIDI note 60 to zyn note 0 (middle C).
 constexpr int kMidiMiddleC = 60;
 constexpr int kMaxVoices = 64;
+
+const IColor kBg(255, 22, 24, 28);
+const IColor kPanel(255, 30, 33, 39);
+const IColor kTextCol(255, 222, 228, 236);
+const IColor kDim(255, 130, 140, 155);
+const IColor kAccent(255, 120, 190, 255);
+
+IVStyle DarkStyle() {
+  // Every slot has to be set, not just the obvious ones. kPR in particular is
+  // what IVTabbedPagesControl fills its page area with, so leaving it at the
+  // default painted the whole tab body light blue.
+  return DEFAULT_STYLE
+      .WithColor(kBG, kPanel)                        // widget background
+      .WithColor(kFG, IColor(255, 52, 58, 68))       // widget fill
+      .WithColor(kPR, IColor(255, 26, 29, 34))       // pressed, and tab page body
+      .WithColor(kFR, IColor(255, 70, 78, 90))       // frame
+      .WithColor(kON, kAccent)
+      .WithColor(kOFF, IColor(255, 44, 49, 58))
+      .WithColor(kHL, IColor(40, 255, 255, 255))     // mouse-over wash
+      .WithColor(kSH, IColor(0, 0, 0, 0))
+      .WithColor(kX1, kAccent)
+      .WithLabelText(IText(12.f, kDim))
+      .WithValueText(IText(12.f, kTextCol))
+      .WithDrawShadows(false);
+}
 } // namespace
 
 Seedlathe::Seedlathe(const InstanceInfo& info)
@@ -19,11 +51,14 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
 {
   // Stepped integers so hosts quantise them exactly. See SeedlatheParams.h for
   // why the seed is split across two of them.
-  GetParam(sl::kSeedHi)->InitInt("Seed Hi", 0, 0, 65535);
-  GetParam(sl::kSeedLo)->InitInt("Seed Lo", 13, 0, 65535);
+  GetParam(sl::kSeedHi)->InitInt("Seed Hi", 56506, 0, 65535);
+  GetParam(sl::kSeedLo)->InitInt("Seed Lo", 7024, 0, 65535);
   GetParam(sl::kVolume)->InitDouble("Volume", 100., 0., 500., 0.1, "%");
   GetParam(sl::kOctave)->InitInt("Octave", 0, -3, 3);
   GetParam(sl::kVoices)->InitInt("Voices", 32, 1, kMaxVoices);
+  GetParam(sl::kTypeFilter)->InitEnum("Type", 0, 11, "", IParam::kFlagsNone, "",
+                                      "Any", "Pad", "Lead", "Bass", "Key", "Pluck",
+                                      "Bell", "String", "Drum", "Perc", "FX");
 
 #if IPLUG_EDITOR
   mMakeGraphicsFunc = [&]() {
@@ -31,27 +66,188 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
                         GetScaleForScreen(PLUG_WIDTH, PLUG_HEIGHT));
   };
 
-  mLayoutFunc = [&](IGraphics* pGraphics) {
-    pGraphics->AttachPanelBackground(IColor(255, 24, 26, 30));
-    pGraphics->EnableMouseOver(true);
-    pGraphics->LoadFont("Roboto-Regular", ROBOTO_FN);
+  mLayoutFunc = [&](IGraphics* g) {
+    const IVStyle style = DarkStyle();
 
-    const IRECT b = pGraphics->GetBounds().GetPadded(-16.f);
-    const IRECT top = b.GetFromTop(150.f);
-    pGraphics->AttachControl(new IVNumberBoxControl(
-        top.GetGridCell(0, 1, 4).GetCentredInside(120.f, 60.f), sl::kSeedHi, nullptr, "Seed Hi"));
-    pGraphics->AttachControl(new IVNumberBoxControl(
-        top.GetGridCell(1, 1, 4).GetCentredInside(120.f, 60.f), sl::kSeedLo, nullptr, "Seed Lo"));
-    pGraphics->AttachControl(new IVKnobControl(
-        top.GetGridCell(2, 1, 4).GetCentredInside(90.f), sl::kVolume, "Volume"));
-    pGraphics->AttachControl(new IVKnobControl(
-        top.GetGridCell(3, 1, 4).GetCentredInside(90.f), sl::kOctave, "Octave"));
-    pGraphics->AttachControl(new IVKeyboardControl(b.GetFromBottom(160.f)), kCtrlTagKeyboard);
+    g->AttachPanelBackground(kBg);
+    g->EnableMouseOver(true);
+    g->LoadFont("Roboto-Regular", ROBOTO_FN);
+
+    const IRECT all = g->GetBounds();
+    const IRECT top = all.GetFromTop(96.f).GetPadded(-10.f);
+    const IRECT keys = all.GetFromBottom(150.f).GetPadded(-10.f);
+    const IRECT mid = all.GetReducedFromTop(96.f).GetReducedFromBottom(150.f).GetPadded(-10.f);
+
+    // ---- top bar -------------------------------------------------------
+    g->AttachControl(new SeedBoxControl(top.GetFromLeft(200.f),
+                                        [this](uint32_t s) { SetSeed(s); }, style),
+                     kCtrlTagSeedBox);
+
+    const IRECT btns = top.GetReducedFromLeft(208.f).GetFromLeft(300.f);
+    g->AttachControl(new IVButtonControl(
+        btns.GetGridCell(0, 1, 3).GetPadded(-3.f),
+        [this](IControl*) { RollRandomSeed(); }, "Random", style));
+    g->AttachControl(new IVButtonControl(
+        btns.GetGridCell(1, 1, 3).GetPadded(-3.f),
+        [this](IControl*) {
+          if (mSearch.running()) mSearch.cancel();
+          else mSearch.start(mInstruments[mLive.load(std::memory_order_acquire)], 0.0);
+        }, "Find Similar", style));
+    g->AttachControl(new IVButtonControl(
+        btns.GetGridCell(2, 1, 3).GetPadded(-3.f),
+        [this](IControl*) { mPool.allNotesOff(); }, "Panic", style));
+
+    const IRECT knobs = top.GetFromRight(280.f);
+    g->AttachControl(new IVKnobControl(knobs.GetGridCell(0, 1, 3).GetPadded(-4.f),
+                                       sl::kVolume, "Volume", style));
+    g->AttachControl(new IVKnobControl(knobs.GetGridCell(1, 1, 3).GetPadded(-4.f),
+                                       sl::kOctave, "Octave", style));
+    g->AttachControl(new IVKnobControl(knobs.GetGridCell(2, 1, 3).GetPadded(-4.f),
+                                       sl::kTypeFilter, "Roll type", style));
+
+    // ---- tabs ----------------------------------------------------------
+    // iPlug2's IVTabbedPagesControl keys its pages on const char*, so the tab
+    // order is whatever the linker produced, and AddPage is private. A small
+    // tab bar plus iPlug2's control groups gives a stable order instead.
+    const IRECT tabBar = mid.GetFromTop(30.f);
+    const IRECT page = mid.GetReducedFromTop(36.f);
+
+    g->AttachControl(new TabBarControl(
+        tabBar, {"Instrument", "Presets", "Search", "Design"},
+        [g](int index) {
+          static const char* kGroups[] = {"instrument", "presets", "search", "design"};
+          for (int i = 0; i < 4; ++i)
+            g->ForControlInGroup(kGroups[i], [i, index](IControl* c) { c->Hide(i != index); });
+        }));
+
+    // -- Instrument
+    g->AttachControl(new ITextControl(page.GetFromTop(20.f), "Loaded instrument",
+                                      IText(12.f, kDim)), kNoTag, "instrument");
+    g->AttachControl(new ITextControl(page.GetReducedFromTop(20.f).GetFromTop(30.f), "",
+                                      IText(19.f, kTextCol)), kCtrlTagTypeLabel, "instrument");
+    g->AttachControl(new IVScopeControl<1, 128>(page.GetReducedFromTop(58.f), "Output", style),
+                     kCtrlTagScope, "instrument");
+
+    // -- Presets
+    g->AttachControl(new ITextControl(page.GetFromTop(20.f),
+        "Factory bank -- 115 presets, grouped by instrument type",
+        IText(12.f, kDim)), kNoTag, "presets");
+    {
+      auto* list = new ListControl(page.GetReducedFromTop(24.f), [this](int payload) {
+        const auto& p = sl::kFactoryPresets[payload];
+        SetSeed(p.seed);
+        GetParam(sl::kOctave)->Set(std::clamp(p.octave, -3, 3));
+        SendParameterValueFromDelegate(sl::kOctave,
+                                       GetParam(sl::kOctave)->GetNormalized(), true);
+      });
+
+      // Grouped by instrument type, in type order, as the demo page does.
+      std::vector<ListControl::Row> rows;
+      for (int t = 0; t < 10; ++t) {
+        bool header = false;
+        for (int i = 0; i < sl::kNumFactoryPresets; ++i) {
+          const auto& p = sl::kFactoryPresets[i];
+          if (p.typeIndex != t) continue;
+          if (!header) { rows.push_back({TypeName(t), "", true, -1}); header = true; }
+          char detail[32];
+          std::snprintf(detail, sizeof(detail), "%u", p.seed);
+          rows.push_back({p.name, detail, false, i});
+        }
+      }
+      list->SetRows(std::move(rows));
+      g->AttachControl(list, kCtrlTagPresetList, "presets");
+    }
+
+    // -- Search
+    g->AttachControl(new ITextControl(page.GetFromTop(46.f),
+        "Searches seeds of the same instrument type and keeps the best match "
+        "found. Cancelling keeps it too.",
+        IText(12.f, kDim)), kNoTag, "search");
+    {
+      const IRECT row = page.GetReducedFromTop(50.f).GetFromTop(36.f).GetFromLeft(560.f);
+      g->AttachControl(new IVButtonControl(row.GetGridCell(0, 1, 3).GetPadded(-4.f),
+          [this](IControl*) {
+            mSearch.start(mInstruments[mLive.load(std::memory_order_acquire)], 0.0);
+          }, "Search", style), kNoTag, "search");
+      g->AttachControl(new IVButtonControl(row.GetGridCell(1, 1, 3).GetPadded(-4.f),
+          [this](IControl*) {
+            mSearch.start(mInstruments[mLive.load(std::memory_order_acquire)],
+                          mSearchThreshold);
+          }, "Search until 90%", style), kNoTag, "search");
+      g->AttachControl(new IVButtonControl(row.GetGridCell(2, 1, 3).GetPadded(-4.f),
+          [this](IControl*) { mSearch.cancel(); }, "Stop", style), kNoTag, "search");
+      g->AttachControl(new ITextControl(page.GetReducedFromTop(94.f).GetFromTop(28.f),
+          "Idle", IText(15.f, kTextCol)), kCtrlTagSearchStatus, "search");
+    }
+
+    // -- Design
+    g->AttachControl(new ITextControl(page, "Designer: not built yet",
+        IText(14.f, IColor(255, 110, 118, 130))), kNoTag, "design");
+
+    // Everything but the first page starts hidden.
+    for (const char* grp : {"presets", "search", "design"})
+      g->ForControlInGroup(grp, [](IControl* c) { c->Hide(true); });
+
+    // ---- keyboard ------------------------------------------------------
+    g->AttachControl(new IVKeyboardControl(keys), kCtrlTagKeyboard);
+
+    RefreshSeedDisplay();
   };
 #endif
 }
 
 #if IPLUG_DSP
+
+void Seedlathe::SetSeed(uint32_t seed)
+{
+  GetParam(sl::kSeedHi)->Set(sl::seedHi(seed));
+  GetParam(sl::kSeedLo)->Set(sl::seedLo(seed));
+  SendParameterValueFromDelegate(sl::kSeedHi, GetParam(sl::kSeedHi)->GetNormalized(), true);
+  SendParameterValueFromDelegate(sl::kSeedLo, GetParam(sl::kSeedLo)->GetNormalized(), true);
+  RebuildInstrument();
+  RefreshSeedDisplay();
+}
+
+void Seedlathe::RollRandomSeed()
+{
+  // xorshift: a roll only has to feel random, and this keeps no state worth
+  // persisting.
+  mRollState ^= mRollState << 13;
+  mRollState ^= mRollState >> 17;
+  mRollState ^= mRollState << 5;
+
+  uint32_t seed = mRollState;
+  const int filter = GetParam(sl::kTypeFilter)->Int();
+  if (filter > 0) {
+    // The last digit of the seed selects the instrument type, so constraining
+    // the roll is just a matter of fixing that digit.
+    seed = (seed / 10u) * 10u + static_cast<uint32_t>(filter - 1);
+  }
+  SetSeed(seed);
+}
+
+void Seedlathe::RefreshSeedDisplay()
+{
+#if IPLUG_EDITOR
+  auto* ui = GetUI();
+  if (!ui) return;
+
+  const uint32_t seed = sl::seedFrom(GetParam(sl::kSeedHi)->Int(),
+                                     GetParam(sl::kSeedLo)->Int());
+  if (auto* c = ui->GetControlWithTag(kCtrlTagSeedBox))
+    c->As<SeedBoxControl>()->SetSeed(seed);
+
+  if (auto* c = ui->GetControlWithTag(kCtrlTagTypeLabel)) {
+    const sl::Instrument& inst = mInstruments[mLive.load(std::memory_order_acquire)];
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "%s  -  %d oscillator%s%s",
+                  TypeName(inst.typeIndex), inst.oscCount,
+                  inst.oscCount == 1 ? "" : "s",
+                  inst.hasFmMatrix ? "  -  FM matrix" : "");
+    c->As<ITextControl>()->SetStr(buf);
+  }
+#endif
+}
 
 void Seedlathe::RebuildInstrument()
 {
@@ -104,8 +300,42 @@ void Seedlathe::OnReset()
 
 void Seedlathe::OnParamChange(int paramIdx)
 {
-  if (paramIdx == sl::kSeedHi || paramIdx == sl::kSeedLo)
+  if (paramIdx == sl::kSeedHi || paramIdx == sl::kSeedLo) {
     RebuildInstrument();
+    RefreshSeedDisplay();
+  }
+}
+
+void Seedlathe::OnIdle()
+{
+  mScopeSender.TransmitData(*this);
+
+#if IPLUG_EDITOR
+  auto* ui = GetUI();
+  if (!ui) return;
+
+  const bool running = mSearch.running();
+  const auto best = mSearch.best();
+
+  if (running || mSearchWasRunning) {
+    if (auto* c = ui->GetControlWithTag(kCtrlTagSearchStatus)) {
+      char buf[160];
+      if (best.found)
+        std::snprintf(buf, sizeof(buf), "%s  -  best %.1f%%  seed %u  (%llu tried)",
+                      running ? "Searching" : "Done", best.score, best.seed,
+                      static_cast<unsigned long long>(best.tested));
+      else
+        std::snprintf(buf, sizeof(buf), "%s...", running ? "Searching" : "Idle");
+      c->As<ITextControl>()->SetStr(buf);
+    }
+  }
+
+  // Adopt the winner once, when the search finishes.
+  if (mSearchWasRunning && !running && best.found)
+    SetSeed(best.seed);
+
+  mSearchWasRunning = running;
+#endif
 }
 
 void Seedlathe::ProcessMidiMsg(const IMidiMsg& msg)
@@ -138,8 +368,7 @@ void Seedlathe::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
 {
   // Flush denormals for the duration of the callback. Decaying reverb and
   // delay tails run down toward 1e-38, where the CPU falls back to microcode
-  // and costs orders of magnitude more per operation. Measured at only ~1.1x
-  // here, but it is free and it is what every host expects a plugin to do.
+  // and costs orders of magnitude more per operation.
   const unsigned mxcsr = _mm_getcsr();
   _mm_setcsr(mxcsr | 0x8040);   // FTZ | DAZ
 
@@ -166,6 +395,8 @@ void Seedlathe::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
     if (nChans > 0) outputs[0][s] = l;
     if (nChans > 1) outputs[1][s] = r;
   }
+
+  mScopeSender.ProcessBlock(outputs, nFrames, kCtrlTagScope, 1);
 
   _mm_setcsr(mxcsr);
 }

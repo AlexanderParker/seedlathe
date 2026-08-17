@@ -12,6 +12,8 @@ iplug_add_plugin(Seedlathe
     Seedlathe.cpp
     Seedlathe.h
     config.h
+    SeedlatheControls.h
+    SeedlatheParams.h
     resources/resource.h
   RESOURCES
     resources/fonts/Roboto-Regular.ttf
