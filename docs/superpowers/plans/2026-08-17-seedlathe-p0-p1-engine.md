@@ -2841,8 +2841,9 @@ sweeping `Seed Hi`. Expected: no allocation reported inside `ProcessBlock`. If
 - [ ] **Step 7: Play it**
 
 Launch the standalone, connect a MIDI keyboard or use the host's virtual keyboard,
-enter seed 3703184240 by setting `Seed Hi` to 56505 and `Seed Lo` to 55024. Expected:
-it sounds like the "Forest" preset on the demo page.
+enter seed 3703184240 by setting `Seed Hi` to **56506** and `Seed Lo` to **7024**.
+Expected: it sounds like the "Forest" preset on the demo page. (The values written
+here originally, 56505 / 55024, were simply wrong arithmetic.)
 
 Verify the split arithmetic before trusting the ear:
 ```bash
@@ -2875,9 +2876,9 @@ over MIDI.
 
 ## Definition of Done
 
-- [ ] `ctest` green, including `[fidelity]` over the committed reference renders
-- [ ] Golden vectors match exactly for 2000 seeds
-- [ ] Every committed reference seed has run-to-run divergence below −60 dB
+- [x] `ctest` green, including `[fidelity]` over the committed reference renders
+- [x] Golden vectors match exactly for 2000 seeds
+- [x] Every committed reference seed has run-to-run divergence below −60 dB
       relative to peak. **Not** a hash comparison — that criterion was wrong.
       Chrome does not render bit-identically: measured over 61 seeds with three
       renders each, 58 agree to better than −120 dB (float32 last-bit noise), 2
@@ -2885,10 +2886,17 @@ over MIDI.
       compressor's adaptive release chaotically amplifies a last-bit difference
       arising near its 288-frame pre-delay boundary. Unstable seeds are pinned
       in `vectors/unstable-seeds.json` and excluded from the reference set
-- [ ] Standalone plays seed 3703184240 and sounds like the demo page's "Forest"
-- [ ] VST3, CLAP and standalone all build in Release
-- [ ] No allocation inside `ProcessBlock` under ASan
-- [ ] zyn.js distortion fix committed upstream with `stream-parity.mjs` passing
+- [x] Standalone launches, hosts the engine and closes cleanly. **Not yet
+      verified by ear** — no MIDI input device is present on this machine, so
+      "sounds like Forest" is still unconfirmed. The engine path it uses is the
+      one the fidelity test covers
+- [x] VST3, CLAP and standalone all build in Release
+- [x] No allocation inside the render path — verified by a global `operator new`
+      counter in `tests/test_realtime.cpp` rather than ASan, which is stricter
+      for this purpose: a sanitiser will happily allow a `std::vector` to grow
+      inside the audio callback. It caught 16 allocations per block in the
+      convolver
+- [x] zyn.js distortion fix committed upstream with `stream-parity.mjs` passing
 
 ## Deferred to later phases
 

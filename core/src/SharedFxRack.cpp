@@ -148,6 +148,11 @@ void SharedFxRack::addEdge(int delaySlot, int verbSlot) {
 SharedFxRack::Route SharedFxRack::acquireRoute(const Osc& osc) {
     Route route;
 
+    // A host can drive parameter changes before prepare() runs -- iPlug2 fires
+    // OnParamChange during construction, ahead of OnReset. Without this the
+    // pool-index modulo divides by zero and the plugin dies at startup.
+    if (delays_.empty() || verbs_.empty()) return route;
+
     if (osc.del.on) {
         const uint64_t key = delayKey(osc.del);
         if (const Entry* e = find(key)) {
@@ -234,6 +239,12 @@ void SharedFxRack::mixAndAdvance(double& outL, double& outR) {
     outL = masterL_;
     outR = masterR_;
     masterL_ = masterR_ = 0.0;
+}
+
+void SharedFxRack::prewarm(const Instrument& inst) {
+    for (int i = 0; i < inst.oscCount; ++i)
+        acquireRoute(inst.oscs[static_cast<size_t>(i)]);
+    buildPending();
 }
 
 void SharedFxRack::buildPending() {

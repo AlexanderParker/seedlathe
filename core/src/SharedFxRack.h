@@ -46,8 +46,15 @@ public:
     // zyn calls cleanupFxNodes at the top of every render().
     void beginRender();
 
-    // Called once per oscillator at note-on.
+    // Called once per oscillator at note-on. Allocation-free: any reverb it
+    // newly encounters is queued for buildPending rather than generated here.
     Route acquireRoute(const Osc& osc);
+
+    // Acquires every route an instrument needs and generates its reverb
+    // impulses up front. Allocates, so this belongs on the message thread --
+    // call it when the instrument changes, and note-on then finds everything
+    // already cached and never queues work from the audio thread.
+    void prewarm(const Instrument& inst);
 
     // Called once per sample per oscillator, with the post-pan signal.
     void push(const Route& route, double l, double r);

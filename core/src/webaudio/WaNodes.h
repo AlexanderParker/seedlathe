@@ -94,6 +94,11 @@ private:
     size_t partitions_ = 0;
     std::vector<std::vector<double>> irRe_, irIm_;
     Channel left_, right_;
+
+    // Scratch for processBlock, allocated once in buildImpulse. Creating these
+    // per call cost 16 allocations per audio callback -- see
+    // tests/test_realtime.cpp.
+    std::vector<double> scratchRe_, scratchIm_, accRe_, accIm_;
 };
 
 // StereoPannerNode's equal-power law for a mono input.

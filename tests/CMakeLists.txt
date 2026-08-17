@@ -14,11 +14,14 @@ add_executable(sl_tests
   test_offlinerender.cpp
   test_analysis.cpp
   test_fidelity.cpp
+  test_seedsplit.cpp
+  test_realtime.cpp
 )
 
 target_link_libraries(sl_tests PRIVATE sl_core Catch2::Catch2WithMain)
 target_compile_options(sl_tests PRIVATE ${SEEDLATHE_WARNINGS})
 
+target_include_directories(sl_tests PRIVATE ${CMAKE_SOURCE_DIR}/plugin)
 target_compile_definitions(sl_tests PRIVATE
   SL_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
   SL_VECTORS_DIR="${CMAKE_SOURCE_DIR}/vectors")

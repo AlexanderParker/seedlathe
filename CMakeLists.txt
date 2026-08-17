@@ -10,6 +10,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(IPLUG2_CXX_STANDARD 20 CACHE STRING "C++ standard for iPlug2")
 
 if(MSVC)
+  # iPlug2 links the static CRT. Everything sl_core is linked into must agree,
+  # or the plugin targets fail with LNK2038 RuntimeLibrary mismatches.
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
   # /fp:precise is load-bearing: /fp:fast lets MSVC reassociate floating-point
   # expressions, which breaks exact golden-vector equality against zyn.js.
   add_compile_options(/fp:precise)

@@ -146,6 +146,12 @@ void WaConvolver::buildImpulse(double duration, double decay, uint32_t rngSeed) 
         c->fdlPos = 0;
         c->outPos = 0;
     }
+
+    scratchRe_.assign(fftSize, 0.0);
+    scratchIm_.assign(fftSize, 0.0);
+    accRe_.assign(fftSize, 0.0);
+    accIm_.assign(fftSize, 0.0);
+
     ready_ = true;
 }
 
@@ -166,15 +172,23 @@ void WaConvolver::processBlock(Channel& c) {
     const size_t fftSize = blockSize_ * 2;
     const Fft& fft = fftOfSize(fftSize);
 
-    // Newest input block into the frequency-domain delay line.
-    std::vector<double> re(fftSize, 0.0), im(fftSize, 0.0);
+    // Newest input block into the frequency-domain delay line. All four
+    // buffers are members: constructing them here cost 16 allocations per
+    // audio callback, which tests/test_realtime.cpp now forbids.
+    auto& re = scratchRe_;
+    auto& im = scratchIm_;
+    std::fill(re.begin(), re.end(), 0.0);
+    std::fill(im.begin(), im.end(), 0.0);
     for (size_t i = 0; i < blockSize_; ++i) re[i] = c.inBlock[i];
     fft.transform(re, im, false);
     c.fdlRe[c.fdlPos] = re;
     c.fdlIm[c.fdlPos] = im;
 
     // Accumulate sum over partitions of input[k - p] * ir[p].
-    std::vector<double> accRe(fftSize, 0.0), accIm(fftSize, 0.0);
+    auto& accRe = accRe_;
+    auto& accIm = accIm_;
+    std::fill(accRe.begin(), accRe.end(), 0.0);
+    std::fill(accIm.begin(), accIm.end(), 0.0);
     for (size_t p = 0; p < partitions_; ++p) {
         const size_t idx = (c.fdlPos + partitions_ - p) % partitions_;
         const auto& xr = c.fdlRe[idx];
