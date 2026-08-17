@@ -343,3 +343,22 @@ TEST_CASE("voice internals breakdown", "[.perf]") {
     }
     REQUIRE(true);
 }
+
+#include "SeedSearch.h"
+
+TEST_CASE("search throughput", "[.perf]") {
+    const auto target = sl::generateInstrument(3703184240u);
+    std::atomic<int> batches{0};
+    auto stop = [&] { return batches.load() >= 2000; };
+
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto res = sl::SeedSearch::run(target, 1u, 0.0, stop,
+        [&](const sl::SeedSearch::Result&) { batches.fetch_add(1); });
+    const double secs = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t0).count();
+
+    std::printf("  %.0f candidates/sec on one thread (best %.1f%% after %llu)\n",
+                double(res.tested) / secs, res.score,
+                static_cast<unsigned long long>(res.tested));
+    REQUIRE(true);
+}

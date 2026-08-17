@@ -17,6 +17,7 @@ add_executable(sl_tests
   test_seedsplit.cpp
   test_realtime.cpp
   test_seedchange.cpp
+  test_seedsearch.cpp
   test_perf.cpp
 )
 

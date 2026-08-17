@@ -10,6 +10,7 @@ add_library(sl_core STATIC
   src/SharedFxRack.cpp
   src/Voice.cpp
   src/RackPool.cpp
+  src/SeedSearch.cpp
   src/OfflineRender.cpp
   src/Analysis.cpp
 )
