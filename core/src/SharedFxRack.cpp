@@ -110,6 +110,7 @@ void SharedFxRack::prepare(double sampleRate) {
     nextVerb_ = 0;
     masterL_ = masterR_ = 0.0;
     anyLive_ = false;
+    silentBlocks_ = 0;
 
     delayInL_.assign(delays_.size(), std::vector<double>(kMaxBlock, 0.0));
     delayInR_.assign(delays_.size(), std::vector<double>(kMaxBlock, 0.0));
@@ -131,6 +132,7 @@ void SharedFxRack::reset() {
     nextVerb_ = 0;
     masterL_ = masterR_ = 0.0;
     anyLive_ = false;
+    silentBlocks_ = 0;
 }
 
 const SharedFxRack::Entry* SharedFxRack::find(uint64_t key) const {
@@ -178,6 +180,7 @@ SharedFxRack::Route SharedFxRack::acquireRoute(const Osc& osc) {
         }
         delayLive_[static_cast<size_t>(route.delaySlot)] = true;
         anyLive_ = true;
+        silentBlocks_ = 0;
     } else {
         // zyn still caches a no-op gain node here, keyed on the whole
         // oscillator config. It is inaudible, but it occupies a cache slot and
@@ -203,6 +206,7 @@ SharedFxRack::Route SharedFxRack::acquireRoute(const Osc& osc) {
         }
         verbLive_[static_cast<size_t>(route.verbSlot)] = true;
         anyLive_ = true;
+        silentBlocks_ = 0;
     }
 
     if (route.delaySlot >= 0) addEdge(route.delaySlot, route.verbSlot);
@@ -375,10 +379,14 @@ void SharedFxRack::mixBlock(float* outL, float* outR, int frames) {
         }
     }
 
+    bool silent = true;
     for (size_t i = 0; i < n; ++i) {
-        outL[i] = static_cast<float>(blockMasterL_[i]);
-        outR[i] = static_cast<float>(blockMasterR_[i]);
+        const double l = blockMasterL_[i], r = blockMasterR_[i];
+        outL[i] = static_cast<float>(l);
+        outR[i] = static_cast<float>(r);
+        if (l > 1e-7 || l < -1e-7 || r > 1e-7 || r < -1e-7) silent = false;
     }
+    silentBlocks_ = silent ? silentBlocks_ + 1 : 0;
 }
 
 void SharedFxRack::buildPending() {

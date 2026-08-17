@@ -80,3 +80,43 @@ TEST_CASE("a rack is never rebuilt while a voice is bound to it") {
         REQUIRE(pool.rackInUse(first));
     }
 }
+
+TEST_CASE("a reverb tail keeps sounding after the note is released") {
+    // Regression: VoicePool used to mix only racks that had ACTIVE voices, so
+    // the instant a voice ended its reverb and delay tails were cut dead.
+    // Releasing a key chopped seconds of tail off in the plugin, while the
+    // offline renderer -- which mixes unconditionally -- never showed it.
+    sl::RackPool racks;
+    racks.prepare(48000.0, 4);
+    sl::VoicePool pool;
+    pool.prepare(48000.0, 8);
+
+    // 1 oscillator, a 2.44 s reverb and a delay: the seed reported as having
+    // "no decay" on release.
+    const auto inst = sl::generateInstrument(3703184240u);
+    racks.rebuild(inst, pool);
+
+    std::vector<float> l(256), r(256);
+    auto renderFor = [&](int blocks) {
+        double peak = 0.0;
+        for (int b = 0; b < blocks; ++b) {
+            racks.audioBlockStarted(pool);
+            pool.render(l.data(), r.data(), 256, racks.all(), racks.allCount());
+            for (int i = 0; i < 256; ++i) peak = std::max(peak, std::abs(double(l[i])));
+        }
+        return peak;
+    };
+
+    pool.noteOn(racks.liveRack(), inst, 0, 1.0, true);
+    renderFor(200);                       // ~1.1 s of held note
+    pool.noteOff(0);
+
+    // The amplitude envelope's release is 410 ms; give it a second to finish.
+    renderFor(190);
+    REQUIRE(pool.activeCount() == 0);     // the voice itself is done
+
+    // The reverb tail must still be audible well beyond that.
+    const double tail = renderFor(90);    // roughly another half second
+    INFO("tail peak after the voice ended: " << tail);
+    REQUIRE(tail > 1e-5);
+}

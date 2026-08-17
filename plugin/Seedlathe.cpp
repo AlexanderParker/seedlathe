@@ -156,7 +156,8 @@ void Seedlathe::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
   }
 
   mRacks.audioBlockStarted(mPool);
-  mPool.render(mLeft.data(), mRight.data(), nFrames);
+  mPool.render(mLeft.data(), mRight.data(), nFrames,
+               mRacks.all(), mRacks.allCount());
 
   for (int s = 0; s < nFrames; ++s)
   {

@@ -393,13 +393,14 @@ bool VoicePool::rackInUse(const SharedFxRack* rack) const {
     return false;
 }
 
-void VoicePool::render(float* left, float* right, int frames) {
+void VoicePool::render(float* left, float* right, int frames,
+                       SharedFxRack* const* allRacks, int rackCount) {
     int done = 0;
     while (done < frames) {
         const int n = std::min(frames - done, SharedFxRack::kMaxBlock);
 
-        // Gather the active voices, and the distinct racks they reference,
-        // once per block rather than once per sample.
+        // Gather the active voices, and the distinct racks to mix, once per
+        // block rather than once per sample.
         active_.clear();
         racks_.clear();
         for (auto& v : voices_) {
@@ -407,6 +408,15 @@ void VoicePool::render(float* left, float* right, int frames) {
             active_.push_back(&v);
             SharedFxRack* r = const_cast<SharedFxRack*>(v.rack());
             if (!r) continue;
+            bool seen = false;
+            for (auto* known : racks_) if (known == r) { seen = true; break; }
+            if (!seen) racks_.push_back(r);
+        }
+
+        // Plus any rack still ringing with no voices left on it.
+        for (int k = 0; k < rackCount; ++k) {
+            SharedFxRack* r = allRacks[k];
+            if (!r || !r->ringing()) continue;
             bool seen = false;
             for (auto* known : racks_) if (known == r) { seen = true; break; }
             if (!seen) racks_.push_back(r);

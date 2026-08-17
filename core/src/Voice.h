@@ -132,10 +132,12 @@ public:
     void noteOff(int note);
     void allNotesOff();
 
-    // Mixes every rack that sounding voices reference, not just one. Changing
-    // the seed hands new notes a different rack while held notes finish on the
-    // one they started with.
-    void render(float* left, float* right, int frames);
+    // Mixes every rack that sounding voices reference, and -- when the caller
+    // supplies the full set -- every rack still ringing. A reverb tail
+    // outlives the note that caused it, so dropping a rack the moment its last
+    // voice ends chops the tail off the instant a key is released.
+    void render(float* left, float* right, int frames,
+                SharedFxRack* const* allRacks = nullptr, int rackCount = 0);
 
     int activeCount() const;
 

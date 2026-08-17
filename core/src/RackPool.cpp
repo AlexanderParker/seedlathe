@@ -11,7 +11,11 @@ void RackPool::prepare(double sampleRate, int numRacks) {
         racks_.push_back(std::make_unique<SharedFxRack>());
         racks_.back()->prepare(sampleRate);
     }
+    flat_.clear();
+    for (auto& r : racks_) flat_.push_back(r.get());
     freeSince_.assign(static_cast<size_t>(n), 0);
+    wasLive_.assign(static_cast<size_t>(n), false);
+    wasLive_[0] = true;   // rack 0 starts live
     live_.store(0, std::memory_order_release);
     blockEpoch_.store(0, std::memory_order_release);
     retireRequest_.store(-1, std::memory_order_release);
@@ -44,7 +48,8 @@ bool RackPool::rebuild(const Instrument& inst, VoicePool& pool) {
         const int c = (live + i) % n;
         if (c == live) continue;
         if (pool.rackInUse(racks_[static_cast<size_t>(c)].get())) continue;
-        if (freeSince_[static_cast<size_t>(c)] + 2 > epoch) continue;
+        if (wasLive_[static_cast<size_t>(c)] &&
+            freeSince_[static_cast<size_t>(c)] + 2 > epoch) continue;
         target = c;
         break;
     }
@@ -71,6 +76,7 @@ bool RackPool::rebuild(const Instrument& inst, VoicePool& pool) {
 
     // The outgoing rack becomes eligible only once two more blocks have run.
     freeSince_[static_cast<size_t>(live)] = epoch;
+    wasLive_[static_cast<size_t>(target)] = true;
     live_.store(target, std::memory_order_release);
     return true;
 }

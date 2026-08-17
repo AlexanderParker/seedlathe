@@ -98,6 +98,12 @@ public:
     // True while any node still holds state worth mixing.
     bool inUse() const { return anyLive_; }
 
+    // True while the graph is still producing sound of its own. A reverb tail
+    // outlives the note that caused it by seconds, so a rack must keep being
+    // mixed after its last voice ends -- otherwise releasing a key chops the
+    // tail off instantly.
+    bool ringing() const { return anyLive_ && silentBlocks_ < kSilentBlocksToIdle; }
+
 private:
     enum class Kind { Delay, Verb, Passthrough };
     struct Entry {
@@ -122,6 +128,12 @@ private:
 
     double masterL_ = 0.0, masterR_ = 0.0;
     bool anyLive_ = false;
+
+    // Generated reverbs run to 3.1 s and delays feed back for a while beyond
+    // that, so the idle threshold is deliberately generous: 4 s of silence at
+    // the smallest sensible block.
+    static constexpr int kSilentBlocksToIdle = 4 * 48000 / 64;
+    int silentBlocks_ = 0;
 
     // Per-node input buffers for the block interface, sized in prepare().
     std::vector<std::vector<double>> delayInL_, delayInR_;

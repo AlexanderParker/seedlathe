@@ -42,11 +42,22 @@ public:
     int rackCount() const { return static_cast<int>(racks_.size()); }
     SharedFxRack* rackAt(int i) { return racks_[static_cast<size_t>(i)].get(); }
 
+    // Flat view for the render path: every rack, so tails on retired ones keep
+    // sounding after their last voice ends.
+    SharedFxRack* const* all() const { return flat_.data(); }
+    int allCount() const { return static_cast<int>(flat_.size()); }
+
 private:
     std::vector<std::unique_ptr<SharedFxRack>> racks_;
     std::atomic<int> live_{0};
     std::atomic<uint64_t> blockEpoch_{0};
     std::vector<uint64_t> freeSince_;
+    // A rack that has never been live cannot have a note on its way to it, so
+    // the quiescence wait does not apply. Without this the very first build is
+    // refused -- the epoch is still 0 -- and the plugin runs on a rack that was
+    // never prewarmed, with no reverb at all.
+    std::vector<bool> wasLive_;
+    std::vector<SharedFxRack*> flat_;
     std::atomic<int> retireRequest_{-1};
 };
 
