@@ -1,5 +1,6 @@
 add_library(sl_core STATIC
   src/InstrumentGen.cpp
+  src/PresetIO.cpp
 )
 
 target_include_directories(sl_core
