@@ -3,6 +3,7 @@ add_library(sl_core STATIC
   src/PresetIO.cpp
   src/webaudio/WaParam.cpp
   src/webaudio/WaOscillator.cpp
+  src/webaudio/WaBiquad.cpp
 )
 
 target_include_directories(sl_core

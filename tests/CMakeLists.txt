@@ -6,6 +6,7 @@ add_executable(sl_tests
   test_instrumentgen.cpp
   test_waparam.cpp
   test_waoscillator.cpp
+  test_wabiquad.cpp
 )
 
 target_link_libraries(sl_tests PRIVATE sl_core Catch2::Catch2WithMain)
