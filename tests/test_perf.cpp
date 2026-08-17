@@ -44,10 +44,10 @@ TEST_CASE("render path realtime factor", "[.perf]") {
         sl::SharedFxRack rack;
         rack.prepare(sr);
         sl::VoicePool pool;
-        pool.prepare(sr, 32, &rack);
+        pool.prepare(sr, 32);
         const auto inst = sl::generateInstrument(c.seed);
         rack.prewarm(inst);
-        for (int v = 0; v < c.voices; ++v) pool.noteOn(inst, v * 3, 1.0, true);
+        for (int v = 0; v < c.voices; ++v) pool.noteOn(&rack, inst, v * 3, 1.0, true);
 
         const double cpu = secondsFor([&] {
             for (int i = 0; i < frames; i += 512)
@@ -128,9 +128,9 @@ TEST_CASE("where the time actually goes", "[.perf]") {
         sl::SharedFxRack rack;
         rack.prepare(sr);
         sl::VoicePool pool;
-        pool.prepare(sr, 32, &rack);
+        pool.prepare(sr, 32);
         rack.prewarm(inst);
-        for (int v = 0; v < voices; ++v) pool.noteOn(inst, v * 3, 1.0, true);
+        for (int v = 0; v < voices; ++v) pool.noteOn(&rack, inst, v * 3, 1.0, true);
         const double cpu = secondsFor([&] {
             for (int i = 0; i < frames; i += 512) pool.render(l.data(), r.data(), 512);
         });
@@ -185,10 +185,10 @@ TEST_CASE("denormal cost in decaying tails", "[.perf]") {
         sl::SharedFxRack rack;
         rack.prepare(sr);
         sl::VoicePool pool;
-        pool.prepare(sr, 32, &rack);
+        pool.prepare(sr, 32);
         const auto inst = sl::generateInstrument(13u);
         rack.prewarm(inst);
-        pool.noteOn(inst, 0, 1.0, false);
+        pool.noteOn(&rack, inst, 0, 1.0, false);
 
         std::vector<float> l(512), r(512);
         // Let the note finish so everything is deep in its decay.
@@ -237,13 +237,13 @@ TEST_CASE("compressor and full plugin chain", "[.perf]") {
         sl::SharedFxRack rack;
         rack.prepare(sr);
         sl::VoicePool pool;
-        pool.prepare(sr, 32, &rack);
+        pool.prepare(sr, 32);
         sl::WaCompressor comp;
         comp.prepare(sr);
         comp.setParams(-12.0, 6.0, 8.0, 0.003, 0.15);
         const auto inst = sl::generateInstrument(13u);
         rack.prewarm(inst);
-        for (int v = 0; v < 8; ++v) pool.noteOn(inst, v * 3, 1.0, true);
+        for (int v = 0; v < 8; ++v) pool.noteOn(&rack, inst, v * 3, 1.0, true);
 
         std::vector<float> l(512), r(512);
         const double cpu = secondsFor([&] {
@@ -285,13 +285,13 @@ TEST_CASE("worst-case instruments", "[.perf]") {
         sl::SharedFxRack rack;
         rack.prepare(sr);
         sl::VoicePool pool;
-        pool.prepare(sr, 32, &rack);
+        pool.prepare(sr, 32);
         sl::WaCompressor comp;
         comp.prepare(sr);
         comp.setParams(-12.0, 6.0, 8.0, 0.003, 0.15);
         const auto inst = sl::generateInstrument(c.seed);
         rack.prewarm(inst);
-        for (int v = 0; v < 8; ++v) pool.noteOn(inst, v * 3, 1.0, true);
+        for (int v = 0; v < 8; ++v) pool.noteOn(&rack, inst, v * 3, 1.0, true);
 
         const double cpu = secondsFor([&] {
             for (int i = 0; i < 96000; i += 512) {

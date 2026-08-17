@@ -9,6 +9,7 @@ add_library(sl_core STATIC
   src/webaudio/WaCompressor.cpp
   src/SharedFxRack.cpp
   src/Voice.cpp
+  src/RackPool.cpp
   src/OfflineRender.cpp
   src/Analysis.cpp
 )

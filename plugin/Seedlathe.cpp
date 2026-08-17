@@ -4,6 +4,7 @@
 #include "sl/InstrumentGen.h"
 
 #include <algorithm>
+#include <array>
 #include <pmmintrin.h>
 #include <xmmintrin.h>
 
@@ -66,12 +67,16 @@ void Seedlathe::RebuildInstrument()
     return;
 
   const int next = 1 - mLive.load(std::memory_order_relaxed);
-  mInstruments[next] = sl::generateInstrument(seed);
+  const sl::Instrument candidate = sl::generateInstrument(seed);
 
-  // Generate reverb impulses here, on the message thread. Doing it lazily from
-  // note-on would allocate on the audio thread.
-  mRack.prewarm(mInstruments[next]);
+  // Impulse generation and its FFTs happen here, on the message thread, and
+  // RackPool guarantees the rack it builds into is unreachable from audio.
+  // A refusal means every rack is still sounding; the next parameter change
+  // retries, so dragging the control simply coalesces.
+  if (!mRacks.rebuild(candidate, mPool))
+    return;
 
+  mInstruments[next] = candidate;
   mLive.store(next, std::memory_order_release);
   mCurrentSeed = seed;
 }
@@ -80,9 +85,9 @@ void Seedlathe::OnReset()
 {
   const double sr = GetSampleRate();
 
-  mRack.prepare(sr);
+  mRacks.prepare(sr, kNumRacks);
   mPreparedVoices = GetParam(sl::kVoices)->Int();
-  mPool.prepare(sr, mPreparedVoices, &mRack);
+  mPool.prepare(sr, mPreparedVoices);
   mComp.prepare(sr);
   mComp.setParams(-12.0, 6.0, 8.0, 0.003, 0.15);   // zyn's Z.init settings
 
@@ -113,7 +118,9 @@ void Seedlathe::ProcessMidiMsg(const IMidiMsg& msg)
     // zyn's gain: 0.5 * volume * velocity, with 0.5 applied inside the voice.
     const double gain = (msg.Velocity() / 127.0) * (GetParam(sl::kVolume)->Value() / 100.0);
     const int note = msg.NoteNumber() - kMidiMiddleC + octave * 12;
-    mPool.noteOn(mInstruments[mLive.load(std::memory_order_acquire)], note, gain, true);
+    mPool.noteOn(mRacks.liveRack(),
+                 mInstruments[mLive.load(std::memory_order_acquire)],
+                 note, gain, true);
   }
   else if (status == IMidiMsg::kNoteOff ||
            (status == IMidiMsg::kNoteOn && msg.Velocity() == 0))
@@ -148,6 +155,7 @@ void Seedlathe::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
     return;
   }
 
+  mRacks.audioBlockStarted(mPool);
   mPool.render(mLeft.data(), mRight.data(), nFrames);
 
   for (int s = 0; s < nFrames; ++s)

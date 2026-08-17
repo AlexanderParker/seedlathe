@@ -24,9 +24,16 @@ double noteFrequency(int rootNote, int noteOffset);
 // arithmetic stopped helping at all.
 class Voice {
 public:
-    void prepare(double sampleRate, SharedFxRack* rack);
+    void prepare(double sampleRate);
 
-    void noteOn(const Instrument& inst, int note, double gain, bool sustained);
+    // The rack is bound per NOTE, not per voice. A voice keeps the rack it was
+    // born with for its whole life, which is what makes it safe to build a
+    // replacement on the message thread: the builder only ever touches a rack
+    // no sounding voice references.
+    void noteOn(SharedFxRack* rack, const Instrument& inst, int note,
+                double gain, bool sustained);
+
+    const SharedFxRack* rack() const { return rack_; }
     void noteOff();
     void kill();                    // immediate, for voice stealing
 
@@ -118,20 +125,33 @@ private:
 // a browser tab you can close and not fine in a host.
 class VoicePool {
 public:
-    void prepare(double sampleRate, int maxVoices, SharedFxRack* rack);
+    void prepare(double sampleRate, int maxVoices);
 
-    void noteOn(const Instrument& inst, int note, double gain, bool sustained);
+    void noteOn(SharedFxRack* rack, const Instrument& inst, int note,
+                double gain, bool sustained);
     void noteOff(int note);
     void allNotesOff();
 
+    // Mixes every rack that sounding voices reference, not just one. Changing
+    // the seed hands new notes a different rack while held notes finish on the
+    // one they started with.
     void render(float* left, float* right, int frames);
 
     int activeCount() const;
 
+    // True while any sounding voice still references this rack, so the caller
+    // knows it must not be rebuilt.
+    bool rackInUse(const SharedFxRack* rack) const;
+
+    // Releases every voice bound to a rack so it can be rebuilt. Audio thread
+    // only: a voice's active flag is read every block.
+    void killVoicesUsing(const SharedFxRack* rack);
+
 private:
     std::vector<Voice> voices_;
-    std::vector<Voice*> active_;   // rebuilt per block, never resized in render
-    SharedFxRack* rack_ = nullptr;
+    std::vector<Voice*> active_;         // rebuilt per block, never resized here
+    std::vector<SharedFxRack*> racks_;   // distinct racks among active voices
+    std::vector<float> mixL_, mixR_;
     double sampleRate_ = 48000.0;
 };
 

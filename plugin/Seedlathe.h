@@ -5,10 +5,12 @@
 
 #include "SeedlatheParams.h"
 #include "sl/Instrument.h"
+#include "RackPool.h"
 #include "SharedFxRack.h"
 #include "Voice.h"
 #include "webaudio/WaCompressor.h"
 
+#include <array>
 #include <array>
 #include <atomic>
 #include <vector>
@@ -40,7 +42,13 @@ private:
   // reverbs. Message thread only -- prewarming allocates.
   void RebuildInstrument();
 
-  sl::SharedFxRack mRack;
+  // A pool of racks, not one. Rebuilding a rack frees and reallocates every
+  // buffer inside it, so it may only ever target a rack the audio thread
+  // cannot reach -- dragging the seed control used to segfault on exactly
+  // that. RackPool owns the rule.
+  static constexpr int kNumRacks = 4;
+  sl::RackPool mRacks;
+
   sl::VoicePool mPool;
   sl::WaCompressor mComp;
 

@@ -37,7 +37,7 @@ TEST_CASE("rendering does not allocate once prepared") {
     sl::SharedFxRack rack;
     rack.prepare(48000.0);
     sl::VoicePool pool;
-    pool.prepare(48000.0, 32, &rack);
+    pool.prepare(48000.0, 32);
 
     const auto inst = sl::generateInstrument(3703184240u);
     rack.prewarm(inst);            // message-thread work, allocation allowed here
@@ -49,7 +49,7 @@ TEST_CASE("rendering does not allocate once prepared") {
     g_allocs.store(0);
     g_armed.store(true);
     for (int block = 0; block < 200; ++block) {
-        if (block % 20 == 0) pool.noteOn(inst, block % 12, 1.0, true);
+        if (block % 20 == 0) pool.noteOn(&rack, inst, block % 12, 1.0, true);
         if (block % 20 == 10) pool.noteOff(block % 12);
         pool.render(l.data(), r.data(), 512);
     }
@@ -80,7 +80,7 @@ TEST_CASE("voice stealing does not allocate") {
     sl::SharedFxRack rack;
     rack.prepare(48000.0);
     sl::VoicePool pool;
-    pool.prepare(48000.0, 4, &rack);
+    pool.prepare(48000.0, 4);
 
     const auto inst = sl::generateInstrument(13u);
     rack.prewarm(inst);
@@ -90,7 +90,7 @@ TEST_CASE("voice stealing does not allocate") {
     g_allocs.store(0);
     g_armed.store(true);
     for (int i = 0; i < 200; ++i) {
-        pool.noteOn(inst, i % 24, 1.0, true);   // far more notes than voices
+        pool.noteOn(&rack, inst, i % 24, 1.0, true);   // far more notes than voices
         pool.render(l.data(), r.data(), 256);
     }
     g_armed.store(false);

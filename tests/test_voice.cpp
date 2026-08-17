@@ -16,7 +16,7 @@ struct Rig {
     sl::Voice voice;
     explicit Rig(double sr = 48000.0) {
         rack.prepare(sr);
-        voice.prepare(sr, &rack);
+        voice.prepare(sr);
     }
     // Runs the graph one sample and returns the master output.
     float bufL[1] = {0.f}, bufR[1] = {0.f};
@@ -39,7 +39,7 @@ TEST_CASE("frequency mapping matches zyn's Z.freq") {
 TEST_CASE("a voice produces sound and then goes idle") {
     Rig rig;
     const auto inst = sl::generateInstrument(13);   // "key", 2 oscillators
-    rig.voice.noteOn(inst, 0, 1.0, /*sustained=*/false);
+    rig.voice.noteOn(&rig.rack, inst, 0, 1.0, /*sustained=*/false);
     rig.rack.buildPending();
 
     double peak = 0.0;
@@ -55,7 +55,7 @@ TEST_CASE("a voice produces sound and then goes idle") {
 TEST_CASE("a sustained voice holds until noteOff") {
     Rig rig;
     const auto inst = sl::generateInstrument(3703184240u);
-    rig.voice.noteOn(inst, 0, 1.0, /*sustained=*/true);
+    rig.voice.noteOn(&rig.rack, inst, 0, 1.0, /*sustained=*/true);
     rig.rack.buildPending();
 
     for (int i = 0; i < 48000 * 3; ++i) rig.step();
@@ -69,7 +69,7 @@ TEST_CASE("a sustained voice holds until noteOff") {
 TEST_CASE("editing the instrument mid-note does not disturb a ringing voice") {
     Rig rig;
     sl::Instrument inst = sl::generateInstrument(13);
-    rig.voice.noteOn(inst, 0, 1.0, true);
+    rig.voice.noteOn(&rig.rack, inst, 0, 1.0, true);
     rig.rack.buildPending();
     for (int i = 0; i < 1000; ++i) rig.step();
 
@@ -97,7 +97,7 @@ TEST_CASE("voice output is linear in gain") {
 
     auto peakFor = [&](double gain) {
         Rig rig;
-        rig.voice.noteOn(inst, 0, gain, false);
+        rig.voice.noteOn(&rig.rack, inst, 0, gain, false);
         rig.rack.buildPending();
         double peak = 0.0;
         for (int i = 0; i < 48000; ++i)
@@ -116,10 +116,10 @@ TEST_CASE("pool steals when it runs out of voices") {
     sl::SharedFxRack rack;
     rack.prepare(48000.0);
     sl::VoicePool pool;
-    pool.prepare(48000.0, 4, &rack);
+    pool.prepare(48000.0, 4);
 
     const auto inst = sl::generateInstrument(13);
-    for (int n = 0; n < 8; ++n) pool.noteOn(inst, n, 1.0, true);
+    for (int n = 0; n < 8; ++n) pool.noteOn(&rack, inst, n, 1.0, true);
     rack.buildPending();
     REQUIRE(pool.activeCount() == 4);
 
@@ -135,12 +135,12 @@ TEST_CASE("noteOff releases only the matching note") {
     sl::SharedFxRack rack;
     rack.prepare(48000.0);
     sl::VoicePool pool;
-    pool.prepare(48000.0, 8, &rack);
+    pool.prepare(48000.0, 8);
 
     const auto inst = sl::generateInstrument(3703184240u);
-    pool.noteOn(inst, 0, 1.0, true);
-    pool.noteOn(inst, 4, 1.0, true);
-    pool.noteOn(inst, 7, 1.0, true);
+    pool.noteOn(&rack, inst, 0, 1.0, true);
+    pool.noteOn(&rack, inst, 4, 1.0, true);
+    pool.noteOn(&rack, inst, 7, 1.0, true);
     rack.buildPending();
     REQUIRE(pool.activeCount() == 3);
 
@@ -157,11 +157,11 @@ TEST_CASE("every seed renders finite audio") {
     sl::SharedFxRack rack;
     rack.prepare(48000.0);
     sl::Voice v;
-    v.prepare(48000.0, &rack);
+    v.prepare(48000.0);
 
     for (uint32_t s = 0; s < 400; ++s) {
         rack.reset();
-        v.noteOn(sl::generateInstrument(s), 0, 1.0, false);
+        v.noteOn(&rack, sl::generateInstrument(s), 0, 1.0, false);
         rack.buildPending();
         float bl[256], br[256];
         for (int b = 0; b < 12000 / 256; ++b) {
@@ -182,7 +182,7 @@ TEST_CASE("seeds with an FM matrix stay bounded") {
     sl::SharedFxRack rack;
     rack.prepare(48000.0);
     sl::Voice v;
-    v.prepare(48000.0, &rack);
+    v.prepare(48000.0);
 
     int checked = 0;
     for (uint32_t s = 0; s < 3000 && checked < 20; ++s) {
@@ -191,7 +191,7 @@ TEST_CASE("seeds with an FM matrix stay bounded") {
         ++checked;
 
         rack.reset();
-        v.noteOn(inst, 0, 1.0, false);
+        v.noteOn(&rack, inst, 0, 1.0, false);
         rack.buildPending();
         double peak = 0.0;
         float bl[256], br[256];

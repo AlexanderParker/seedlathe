@@ -87,6 +87,17 @@ public:
 
     static constexpr size_t kMaxFxNodes = 50;   // zyn's Z.maxFxNodes
 
+    // Node pools are far smaller than the entry cache. An instrument has at
+    // most 5 oscillators, so it can name at most 5 distinct delays and 5
+    // distinct reverbs; 8 of each gives headroom. This matters because racks
+    // are now multi-instance (see the plugin) and a 50-deep delay pool is 19 MB
+    // of buffer on its own.
+    static constexpr size_t kDelayNodes = 8;
+    static constexpr size_t kVerbNodes = 8;
+
+    // True while any node still holds state worth mixing.
+    bool inUse() const { return anyLive_; }
+
 private:
     enum class Kind { Delay, Verb, Passthrough };
     struct Entry {
@@ -110,6 +121,7 @@ private:
     size_t nextVerb_ = 0;
 
     double masterL_ = 0.0, masterR_ = 0.0;
+    bool anyLive_ = false;
 
     // Per-node input buffers for the block interface, sized in prepare().
     std::vector<std::vector<double>> delayInL_, delayInR_;

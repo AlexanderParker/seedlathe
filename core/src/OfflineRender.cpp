@@ -18,7 +18,7 @@ RenderResult renderOffline(const Instrument& inst, int note, double gain,
     rack.prepare(sampleRate);
 
     Voice voice;
-    voice.prepare(sampleRate, &rack);
+    voice.prepare(sampleRate);
 
     WaCompressor comp;
     comp.prepare(sampleRate);
@@ -26,7 +26,7 @@ RenderResult renderOffline(const Instrument& inst, int note, double gain,
 
     rack.beginRender();
     // Z.play is a one-shot: full ADSR including release, then stop.
-    voice.noteOn(inst, note, gain, /*sustained=*/false);
+    voice.noteOn(&rack, inst, note, gain, /*sustained=*/false);
     // Offline, so impulses can be generated immediately -- Chrome's convolver
     // is ready from the first sample too.
     rack.buildPending();

@@ -38,9 +38,9 @@ double noteFrequency(int rootNote, int noteOffset) {
     return 261.63 * std::pow(2.0, double(rootNote + noteOffset) / 12.0);
 }
 
-void Voice::prepare(double sampleRate, SharedFxRack* rack) {
+void Voice::prepare(double sampleRate) {
     sampleRate_ = sampleRate;
-    rack_ = rack;
+    rack_ = nullptr;
     for (auto& o : oscs_) {
         o.osc.prepare(sampleRate);
         o.noise.prepare(sampleRate);
@@ -55,7 +55,12 @@ void Voice::prepare(double sampleRate, SharedFxRack* rack) {
     active_ = false;
 }
 
-void Voice::noteOn(const Instrument& inst, int note, double gain, bool sustained) {
+void Voice::noteOn(SharedFxRack* rack, const Instrument& inst, int note,
+                   double gain, bool sustained) {
+    // Bind the rack for the life of this note. Nothing may rebuild a rack while
+    // a voice still points at it.
+    rack_ = rack;
+
     // Copy the instrument: a later edit to the caller's tree must not reach a
     // ringing voice.
     inst_ = inst;
@@ -342,17 +347,20 @@ void Voice::processBlock(int frames) {
 
 // ------------------------------------------------------------- VoicePool
 
-void VoicePool::prepare(double sampleRate, int maxVoices, SharedFxRack* rack) {
+void VoicePool::prepare(double sampleRate, int maxVoices) {
     sampleRate_ = sampleRate;
-    rack_ = rack;
     voices_.resize(static_cast<size_t>(std::max(1, maxVoices)));
     active_.reserve(voices_.size());
-    for (auto& v : voices_) v.prepare(sampleRate, rack);
+    racks_.reserve(voices_.size());
+    mixL_.assign(SharedFxRack::kMaxBlock, 0.0f);
+    mixR_.assign(SharedFxRack::kMaxBlock, 0.0f);
+    for (auto& v : voices_) v.prepare(sampleRate);
 }
 
-void VoicePool::noteOn(const Instrument& inst, int note, double gain, bool sustained) {
+void VoicePool::noteOn(SharedFxRack* rack, const Instrument& inst, int note,
+                       double gain, bool sustained) {
     for (auto& v : voices_) {
-        if (!v.active()) { v.noteOn(inst, note, gain, sustained); return; }
+        if (!v.active()) { v.noteOn(rack, inst, note, gain, sustained); return; }
     }
     // Steal the quietest, breaking ties by age.
     Voice* victim = &voices_[0];
@@ -362,7 +370,7 @@ void VoicePool::noteOn(const Instrument& inst, int note, double gain, bool susta
             victim = &v;
     }
     victim->kill();
-    victim->noteOn(inst, note, gain, sustained);
+    victim->noteOn(rack, inst, note, gain, sustained);
 }
 
 void VoicePool::noteOff(int note) {
@@ -374,20 +382,50 @@ void VoicePool::allNotesOff() {
     for (auto& v : voices_) v.kill();
 }
 
+void VoicePool::killVoicesUsing(const SharedFxRack* rack) {
+    for (auto& v : voices_)
+        if (v.active() && v.rack() == rack) v.kill();
+}
+
+bool VoicePool::rackInUse(const SharedFxRack* rack) const {
+    for (const auto& v : voices_)
+        if (v.active() && v.rack() == rack) return true;
+    return false;
+}
+
 void VoicePool::render(float* left, float* right, int frames) {
     int done = 0;
     while (done < frames) {
         const int n = std::min(frames - done, SharedFxRack::kMaxBlock);
 
-        // Gather the active voices once per block instead of testing all of
-        // them on every sample.
+        // Gather the active voices, and the distinct racks they reference,
+        // once per block rather than once per sample.
         active_.clear();
-        for (auto& v : voices_)
-            if (v.active()) active_.push_back(&v);
+        racks_.clear();
+        for (auto& v : voices_) {
+            if (!v.active()) continue;
+            active_.push_back(&v);
+            SharedFxRack* r = const_cast<SharedFxRack*>(v.rack());
+            if (!r) continue;
+            bool seen = false;
+            for (auto* known : racks_) if (known == r) { seen = true; break; }
+            if (!seen) racks_.push_back(r);
+        }
 
-        rack_->beginBlock(n);
+        for (int i = 0; i < n; ++i) {
+            left[done + i] = 0.f;
+            right[done + i] = 0.f;
+        }
+
+        for (auto* r : racks_) r->beginBlock(n);
         for (Voice* v : active_) v->processBlock(n);
-        rack_->mixBlock(left + done, right + done, n);
+        for (auto* r : racks_) {
+            r->mixBlock(mixL_.data(), mixR_.data(), n);
+            for (int i = 0; i < n; ++i) {
+                left[done + i] += mixL_[static_cast<size_t>(i)];
+                right[done + i] += mixR_[static_cast<size_t>(i)];
+            }
+        }
 
         done += n;
     }

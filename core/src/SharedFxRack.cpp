@@ -91,10 +91,10 @@ void SharedFxRack::prepare(double sampleRate) {
 
     // Pre-allocated pools so acquireRoute() never allocates. The generator's
     // delay time tops out at 0.5 s, which sets the buffer length.
-    delays_.resize(kMaxFxNodes);
+    delays_.resize(kDelayNodes);
     for (auto& d : delays_) d.prepare(sampleRate, 0.5);
 
-    verbs_.resize(kMaxFxNodes / 2);
+    verbs_.resize(kVerbNodes);
     for (auto& v : verbs_) v.prepare(sampleRate);
 
     delayLive_.assign(delays_.size(), false);
@@ -109,6 +109,7 @@ void SharedFxRack::prepare(double sampleRate) {
     nextDelay_ = 0;
     nextVerb_ = 0;
     masterL_ = masterR_ = 0.0;
+    anyLive_ = false;
 
     delayInL_.assign(delays_.size(), std::vector<double>(kMaxBlock, 0.0));
     delayInR_.assign(delays_.size(), std::vector<double>(kMaxBlock, 0.0));
@@ -129,6 +130,7 @@ void SharedFxRack::reset() {
     nextDelay_ = 0;
     nextVerb_ = 0;
     masterL_ = masterR_ = 0.0;
+    anyLive_ = false;
 }
 
 const SharedFxRack::Entry* SharedFxRack::find(uint64_t key) const {
@@ -175,6 +177,7 @@ SharedFxRack::Route SharedFxRack::acquireRoute(const Osc& osc) {
             route.delaySlot = static_cast<int>(slot);
         }
         delayLive_[static_cast<size_t>(route.delaySlot)] = true;
+        anyLive_ = true;
     } else {
         // zyn still caches a no-op gain node here, keyed on the whole
         // oscillator config. It is inaudible, but it occupies a cache slot and
@@ -199,6 +202,7 @@ SharedFxRack::Route SharedFxRack::acquireRoute(const Osc& osc) {
             route.verbSlot = static_cast<int>(slot);
         }
         verbLive_[static_cast<size_t>(route.verbSlot)] = true;
+        anyLive_ = true;
     }
 
     if (route.delaySlot >= 0) addEdge(route.delaySlot, route.verbSlot);
