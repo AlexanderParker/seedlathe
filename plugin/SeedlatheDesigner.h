@@ -336,11 +336,18 @@ public:
 
     void OnMouseDown(float x, float y, const IMouseMod&) override {
         mHot = NearestHandle(x, y);
+        // Latch the time window for the whole drag. Recomputing it as the
+        // envelope grows meant a stage crossing a bracket doubled the plot's
+        // seconds-per-pixel mid-gesture: the handle slowed down under the
+        // cursor and then slid away from it.
+        mDragWindow = Window();
+        mDragging = true;
         SetDirty(false);
     }
 
     void OnMouseUp(float, float, const IMouseMod&) override {
         mHot = 0;
+        mDragging = false;
         SetDirty(false);
     }
 
@@ -382,9 +389,10 @@ private:
         return mRECT.GetPadded(-8.f).GetReducedFromTop(8.f).GetReducedFromBottom(10.f);
     }
 
-    // A round window rather than a tight fit: the plot must not rescale on
-    // every pixel of drag, or the handle slides out from under the cursor.
+    // A round window rather than a tight fit, and frozen while dragging: the
+    // plot must not rescale under the cursor.
     double Window() const {
+        if (mDragging) return mDragWindow;
         const double total = mEnv.aT + mEnv.dT + mEnv.sT + mEnv.rT;
         for (double w : {0.5, 1.0, 2.0, 4.0, 8.0})
             if (total <= w * 0.75) return w;
@@ -435,6 +443,8 @@ private:
     std::function<void()> mOnChange;
     sl::Adsr mEnv{};
     int mHot = 0;
+    bool mDragging = false;
+    double mDragWindow = 1.0;
 };
 
 // The 5x5 FM matrix: rows modulate columns, each cell -1..1. Drag a cell

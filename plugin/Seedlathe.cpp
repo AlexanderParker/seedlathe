@@ -1041,6 +1041,26 @@ void Seedlathe::RefreshSeedDisplay()
     c->As<ITextControl>()->SetStr(buf);
   }
 
+  // Highlight the preset the current seed corresponds to, however it was
+  // reached. Matching on the seed rather than only on a click means rolling
+  // onto a preset's seed shows you where you landed.
+  if (auto* c = ui->GetControlWithTag(kCtrlTagPresetList)) {
+    int payload = -1;
+    const auto& user = mUserPresets.presets();
+    for (size_t i = 0; i < user.size(); ++i)
+      if (user[i].seed == P().seed && user[i].name == mSelectedUserPreset) {
+        payload = kUserPresetBase + static_cast<int>(i);
+        break;
+      }
+    if (payload < 0)
+      for (size_t i = 0; i < user.size(); ++i)
+        if (user[i].seed == P().seed) { payload = kUserPresetBase + static_cast<int>(i); break; }
+    if (payload < 0)
+      for (int i = 0; i < sl::kNumFactoryPresets; ++i)
+        if (sl::kFactoryPresets[i].seed == P().seed) { payload = i; break; }
+    c->As<ListControl>()->SetSelected(payload);
+  }
+
   if (auto* c = ui->GetControlWithTag(kCtrlTagOscCount)) {
     char buf[48];
     std::snprintf(buf, sizeof(buf), "%d of %d", P().designOsc + 1, P().edit.oscCount);
