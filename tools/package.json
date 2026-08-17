@@ -1,0 +1,13 @@
+{
+  "name": "seedlathe-tools",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "vectors": "node export-vectors.mjs",
+    "audio": "node export-reference-audio.mjs"
+  },
+  "dependencies": {
+    "puppeteer-core": "^23.0.0",
+    "zyn": "file:../../zyn"
+  }
+}
