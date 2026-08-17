@@ -180,8 +180,13 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
           IText(11.f, IColor(255, 110, 118, 130), nullptr, EAlign::Near)),
           kNoTag, "instrument");
     }
-    g->AttachControl(new IVScopeControl<1, 128>(page.GetReducedFromTop(114.f), "Output", style),
-                     kCtrlTagScope, "instrument");
+    // The scope draws its trace in kFG and its centre line in kSH, both of
+    // which the dark palette sets to near-invisible greys. It looked like a
+    // dead control until those two were given the accent instead.
+    g->AttachControl(new IVScopeControl<1, 128>(
+        page.GetReducedFromTop(114.f), "Output",
+        style.WithColor(kFG, kAccent).WithColor(kSH, IColor(255, 58, 65, 78))),
+        kCtrlTagScope, "instrument");
 
     // -- Presets
     {
