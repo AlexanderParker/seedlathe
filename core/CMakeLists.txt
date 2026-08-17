@@ -1,0 +1,14 @@
+add_library(sl_core STATIC
+  src/InstrumentGen.cpp
+)
+
+target_include_directories(sl_core
+  PUBLIC
+    include
+    src
+)
+
+target_link_libraries(sl_core PUBLIC nlohmann_json::nlohmann_json)
+
+target_compile_features(sl_core PUBLIC cxx_std_20)
+target_compile_options(sl_core PRIVATE ${SEEDLATHE_WARNINGS})

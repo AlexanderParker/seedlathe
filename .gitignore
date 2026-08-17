@@ -1,0 +1,8 @@
+build/
+out/
+.vs/
+.vscode/
+node_modules/
+*.user
+*.suo
+CMakeUserPresets.json
