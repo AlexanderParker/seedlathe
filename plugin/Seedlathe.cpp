@@ -3,6 +3,9 @@
 
 #include "sl/FactoryPresets.h"
 #include "sl/InstrumentGen.h"
+#include "PresetIO.h"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cstdio>
@@ -10,7 +13,15 @@
 #include <vector>
 #include <xmmintrin.h>
 
+using seedlathe::AdsrControl;
+using seedlathe::DesignerControl;
+using seedlathe::DragValueControl;
+using seedlathe::FmMatrixControl;
 using seedlathe::ListControl;
+using seedlathe::OscSelectControl;
+using seedlathe::PanelControl;
+using seedlathe::SegmentControl;
+using seedlathe::SwitchControl;
 using seedlathe::SeedBoxControl;
 using seedlathe::TabBarControl;
 using seedlathe::TypeName;
@@ -68,6 +79,10 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
 
   mLayoutFunc = [&](IGraphics* g) {
     const IVStyle style = DarkStyle();
+
+    // The previous editor's controls are gone; their pointers must not outlive
+    // it. This runs on every editor open, before anything is attached.
+    mDesignerControls.clear();
 
     g->AttachPanelBackground(kBg);
     g->EnableMouseOver(true);
@@ -181,8 +196,7 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
     }
 
     // -- Design
-    g->AttachControl(new ITextControl(page, "Designer: not built yet",
-        IText(14.f, IColor(255, 110, 118, 130))), kNoTag, "design");
+    BuildDesigner(g, page, style);
 
     // Everything but the first page starts hidden.
     for (const char* grp : {"presets", "search", "design"})
@@ -197,6 +211,347 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
 }
 
 #if IPLUG_DSP
+
+#if IPLUG_EDITOR
+namespace {
+const char* const kWaveNames[]   = {"Sin", "Sqr", "Saw", "Tri", "Nse"};
+const char* const kFilterNames[] = {"LP", "HP", "BP", "LS", "HS", "PK", "AP"};
+const char* const kOverNames[]   = {"1x", "2x", "4x"};
+
+int overIndex(int factor) { return factor >= 4 ? 2 : (factor >= 2 ? 1 : 0); }
+int overFactor(int index) { return index == 2 ? 4 : (index == 1 ? 2 : 1); }
+} // namespace
+
+sl::Osc& Seedlathe::EditOsc()
+{
+  return mEdit.oscs[static_cast<size_t>(std::clamp(mDesignOsc, 0, sl::kMaxOscs - 1))];
+}
+
+void Seedlathe::BuildDesigner(IGraphics* g, const IRECT& page, const IVStyle& style)
+{
+  const auto push = [this]() { PushEdit(); };
+
+  // Small factories, so each control below reads as one line of intent rather
+  // than five lines of plumbing.
+  const auto panel = [&](const IRECT& r, const char* title) {
+    g->AttachControl(new PanelControl(r, title), kNoTag, "design");
+  };
+  const auto track = [&](DesignerControl* c) {
+    g->AttachControl(c, kNoTag, "design");
+    mDesignerControls.push_back(c);
+  };
+  const auto val = [&](const IRECT& r, const char* label, double lo, double hi, int dec,
+                       const char* unit, std::function<double()> get,
+                       std::function<void(double)> set) {
+    track(new DragValueControl(r, label, lo, hi, dec, unit, std::move(get), std::move(set), push));
+  };
+  const auto seg = [&](const IRECT& r, std::vector<const char*> items,
+                       std::function<int()> get, std::function<void(int)> set) {
+    track(new SegmentControl(r, std::move(items), std::move(get), std::move(set), push));
+  };
+  const auto sw = [&](const IRECT& r, const char* label,
+                      std::function<bool()> get, std::function<void(bool)> set) {
+    track(new SwitchControl(r, label, std::move(get), std::move(set), push));
+  };
+  const auto env = [&](const IRECT& r, const char* title, const char* hint,
+                       std::function<sl::Adsr()> get, std::function<void(const sl::Adsr&)> set) {
+    track(new AdsrControl(r, title, hint, std::move(get), std::move(set), push));
+  };
+
+  // ---- oscillator selector ------------------------------------------------
+  const IRECT selRow = page.GetFromTop(26.f);
+
+  auto* oscSel = new OscSelectControl(
+      selRow.GetFromLeft(400.f),
+      [this]() { return mEdit.oscCount; },
+      [this](int i) { mDesignOsc = i; SyncDesigner(); });
+  g->AttachControl(oscSel, kCtrlTagOscSelect, "design");
+  mDesignerControls.push_back(oscSel);
+
+  const IRECT countRow = selRow.GetReducedFromLeft(412.f).GetFromLeft(200.f);
+  g->AttachControl(new IVButtonControl(countRow.GetFromLeft(30.f),
+      [this](IControl*) { SetOscCount(mEdit.oscCount - 1); }, "-", style), kNoTag, "design");
+  g->AttachControl(new ITextControl(countRow.GetReducedFromLeft(34.f).GetFromLeft(130.f), "",
+      IText(11.f, IColor(255, 214, 221, 230))), kCtrlTagOscCount, "design");
+  g->AttachControl(new IVButtonControl(countRow.GetFromRight(30.f),
+      [this](IControl*) { SetOscCount(mEdit.oscCount + 1); }, "+", style), kNoTag, "design");
+
+  // Four columns. The instrument carries far more surface than a knob-per-field
+  // layout could hold at this window size, so it is grouped by what a sound
+  // designer reaches for together rather than by the struct's field order.
+  const float colW = (page.W() - 30.f) / 4.f;
+  const auto col = [&](int i) {
+    const float l = page.L + (colW + 10.f) * static_cast<float>(i);
+    return IRECT(l, page.T + 34.f, l + colW, page.B);
+  };
+  const auto rowIn = [](const IRECT& c, float top, float h) {
+    return IRECT(c.L + 8.f, c.T + top, c.R - 8.f, c.T + top + h);
+  };
+
+  // ---- column 0: the oscillator itself ------------------------------------
+  {
+    const IRECT c = col(0);
+    const IRECT p(c.L, c.T, c.R, c.T + 118.f);
+    panel(p, "OSCILLATOR");
+    seg(rowIn(p, 18.f, 20.f),
+        {kWaveNames[0], kWaveNames[1], kWaveNames[2], kWaveNames[3], kWaveNames[4]},
+        [this]() { return static_cast<int>(EditOsc().waveform); },
+        [this](int i) { EditOsc().waveform = static_cast<sl::Waveform>(i); });
+    val(rowIn(p, 44.f, 20.f), "OCTAVE", -3.0, 3.0, 0, "",
+        [this]() { return double(EditOsc().oct); },
+        [this](double v) { EditOsc().oct = static_cast<int>(std::lround(v)); });
+    val(rowIn(p, 68.f, 20.f), "DETUNE", -12.0, 12.0, 2, " st",
+        [this]() { return EditOsc().detune; },
+        [this](double v) { EditOsc().detune = v; });
+    // Carried for the similarity scorer only: zyn never assigns the filter's
+    // type, so every filter in the audio path is a lowpass. Changing this moves
+    // the seed's neighbours, not its sound.
+    seg(rowIn(p, 92.f, 20.f),
+        {kFilterNames[0], kFilterNames[1], kFilterNames[2], kFilterNames[3],
+         kFilterNames[4], kFilterNames[5], kFilterNames[6]},
+        [this]() { return static_cast<int>(EditOsc().filterType); },
+        [this](int i) { EditOsc().filterType = static_cast<sl::FilterType>(i); });
+
+    env(IRECT(c.L, c.T + 126.f, c.R, c.T + 246.f), "GAIN ENVELOPE", "x note gain",
+        [this]() { return EditOsc().adsrGain; },
+        [this](const sl::Adsr& a) { EditOsc().adsrGain = a; });
+    env(IRECT(c.L, c.T + 252.f, c.R, c.T + 372.f), "FILTER ENVELOPE", "x 20 kHz",
+        [this]() { return EditOsc().adsrFilter; },
+        [this](const sl::Adsr& a) { EditOsc().adsrFilter = a; });
+    env(IRECT(c.L, c.T + 378.f, c.R, c.B), "FILTER Q ENVELOPE", "x 30 dB",
+        [this]() { return EditOsc().adsrFilterQ; },
+        [this](const sl::Adsr& a) { EditOsc().adsrFilterQ = a; });
+  }
+
+  // ---- column 1: modulation -----------------------------------------------
+  {
+    const IRECT c = col(1);
+    struct LfoRef { const char* title; double depthMax; int dec; const char* unit; };
+    const LfoRef refs[3] = {
+        {"GAIN LFO",   1.0,    3, ""},
+        {"FILTER LFO", 8000.0, 0, " Hz"},
+        {"PITCH LFO",  12.0,   2, " x f"},
+    };
+    for (int k = 0; k < 3; ++k) {
+      const IRECT p(c.L, c.T + 116.f * static_cast<float>(k),
+                    c.R, c.T + 116.f * static_cast<float>(k) + 108.f);
+      panel(p, refs[k].title);
+      // One accessor per panel: the LFO it edits depends on the selected
+      // oscillator, which changes under the control after it is built.
+      const auto pick = [this, k]() -> sl::Lfo& {
+        sl::Osc& o = EditOsc();
+        return k == 0 ? o.gLfo : (k == 1 ? o.fLfo : o.pLfo);
+      };
+      sw(rowIn(p, 16.f, 20.f), "ON",
+         [pick]() { return pick().on; }, [pick](bool b) { pick().on = b; });
+      seg(rowIn(p, 40.f, 20.f), {kWaveNames[0], kWaveNames[1], kWaveNames[2], kWaveNames[3]},
+          [pick]() { return static_cast<int>(pick().type); },
+          [pick](int i) { pick().type = static_cast<sl::Waveform>(i); });
+      val(rowIn(p, 62.f, 20.f), "RATE", 0.0, 101.0, 2, " Hz",
+          [pick]() { return pick().frequency; }, [pick](double v) { pick().frequency = v; });
+      val(rowIn(p, 84.f, 20.f), "DEPTH", 0.0, refs[k].depthMax, refs[k].dec, refs[k].unit,
+          [pick]() { return pick().depth; }, [pick](double v) { pick().depth = v; });
+    }
+
+    const IRECT p(c.L, c.T + 348.f, c.R, c.T + 456.f);
+    panel(p, "FM OSCILLATOR");
+    sw(rowIn(p, 16.f, 20.f), "ON",
+       [this]() { return EditOsc().fm.on; }, [this](bool b) { EditOsc().fm.on = b; });
+    seg(rowIn(p, 40.f, 20.f), {kWaveNames[0], kWaveNames[1], kWaveNames[2], kWaveNames[3]},
+        [this]() { return static_cast<int>(EditOsc().fm.type); },
+        [this](int i) { EditOsc().fm.type = static_cast<sl::Waveform>(i); });
+    val(rowIn(p, 62.f, 20.f), "RATIO", 0.0, 101.0, 3, " x",
+        [this]() { return EditOsc().fm.frequency; },
+        [this](double v) { EditOsc().fm.frequency = v; });
+    val(rowIn(p, 84.f, 20.f), "DEPTH", 0.0, 500.0, 1, " Hz",
+        [this]() { return EditOsc().fm.depth; },
+        [this](double v) { EditOsc().fm.depth = v; });
+  }
+
+  // ---- column 2: pitch envelope, distortion, per-oscillator FX -------------
+  {
+    const IRECT c = col(2);
+    IRECT p(c.L, c.T, c.R, c.T + 62.f);
+    panel(p, "PITCH ENVELOPE");
+    sw(rowIn(p, 16.f, 20.f), "ON",
+       [this]() { return EditOsc().pEnv.on; }, [this](bool b) { EditOsc().pEnv.on = b; });
+    val(rowIn(p, 38.f, 20.f), "AMOUNT", 0.0, 4.0, 3, " x f",
+        [this]() { return EditOsc().pEnv.amount; },
+        [this](double v) { EditOsc().pEnv.amount = v; });
+    env(IRECT(c.L, c.T + 68.f, c.R, c.T + 176.f), "PITCH ENV SHAPE", "x amount",
+        [this]() { return EditOsc().pEnv.env; },
+        [this](const sl::Adsr& a) { EditOsc().pEnv.env = a; });
+
+    p = IRECT(c.L, c.T + 182.f, c.R, c.T + 266.f);
+    panel(p, "DISTORTION");
+    sw(rowIn(p, 16.f, 20.f), "ON",
+       [this]() { return EditOsc().dist.on; }, [this](bool b) { EditOsc().dist.on = b; });
+    val(rowIn(p, 38.f, 20.f), "AMOUNT", 0.0, 500.0, 1, "",
+        [this]() { return EditOsc().dist.amount; },
+        [this](double v) { EditOsc().dist.amount = v; });
+    seg(rowIn(p, 60.f, 20.f), {kOverNames[0], kOverNames[1], kOverNames[2]},
+        [this]() { return overIndex(EditOsc().dist.oversample); },
+        [this](int i) { EditOsc().dist.oversample = overFactor(i); });
+
+    p = IRECT(c.L, c.T + 272.f, c.R, c.T + 356.f);
+    panel(p, "DELAY");
+    sw(rowIn(p, 16.f, 20.f), "ON",
+       [this]() { return EditOsc().del.on; }, [this](bool b) { EditOsc().del.on = b; });
+    val(rowIn(p, 38.f, 20.f), "TIME", 0.0, 2.0, 3, " s",
+        [this]() { return EditOsc().del.time; },
+        [this](double v) { EditOsc().del.time = v; });
+    val(rowIn(p, 60.f, 20.f), "FEEDBACK", 0.0, 0.95, 3, "",
+        [this]() { return EditOsc().del.feedback; },
+        [this](double v) { EditOsc().del.feedback = v; });
+
+    p = IRECT(c.L, c.T + 362.f, c.R, c.T + 446.f);
+    panel(p, "REVERB");
+    sw(rowIn(p, 16.f, 20.f), "ON",
+       [this]() { return EditOsc().verb.on; }, [this](bool b) { EditOsc().verb.on = b; });
+    val(rowIn(p, 38.f, 20.f), "DURATION", 0.05, 6.0, 3, " s",
+        [this]() { return EditOsc().verb.duration; },
+        [this](double v) { EditOsc().verb.duration = v; });
+    val(rowIn(p, 60.f, 20.f), "DECAY", 0.0, 4.0, 3, "",
+        [this]() { return EditOsc().verb.decay; },
+        [this](double v) { EditOsc().verb.decay = v; });
+  }
+
+  // ---- column 3: FM matrix and patch actions ------------------------------
+  {
+    const IRECT c = col(3);
+    const IRECT p(c.L, c.T, c.R, c.T + 294.f);
+    panel(p, "FM MATRIX");
+    sw(rowIn(p, 16.f, 20.f), "MATRIX ON",
+       [this]() { return mEdit.hasFmMatrix; }, [this](bool b) { mEdit.hasFmMatrix = b; });
+    track(new FmMatrixControl(
+        rowIn(p, 40.f, 246.f),
+        [this](int src, int tgt) {
+          return mEdit.fmMatrix[static_cast<size_t>(src)][static_cast<size_t>(tgt)];
+        },
+        [this](int src, int tgt, double v) {
+          mEdit.fmMatrix[static_cast<size_t>(src)][static_cast<size_t>(tgt)] = v;
+        },
+        [this]() { return mEdit.oscCount; },
+        push));
+
+    const IRECT q(c.L, c.T + 300.f, c.R, c.T + 392.f);
+    panel(q, "PATCH");
+    g->AttachControl(new IVButtonControl(rowIn(q, 18.f, 22.f),
+        [this](IControl*) {
+          if (auto* ui = GetUI())
+            ui->SetTextInClipboard(sl::instrumentToJson(mEdit).dump(2).c_str());
+        }, "Copy JSON", style), kNoTag, "design");
+    g->AttachControl(new IVButtonControl(rowIn(q, 44.f, 22.f),
+        [this](IControl*) {
+          auto* ui = GetUI();
+          if (!ui) return;
+          WDL_String text;
+          if (!ui->GetTextFromClipboard(text) || !text.GetLength()) return;
+          // Anything at all can be on the clipboard, so a parse failure has to
+          // leave the current patch untouched rather than half-overwrite it.
+          sl::Instrument parsed;
+          try {
+            parsed = sl::instrumentFromJson(nlohmann::json::parse(text.Get()));
+          } catch (const std::exception&) {
+            return;
+          }
+          mEdit = parsed;
+          mDesignOsc = 0;
+          PushEdit();
+          SyncDesigner();
+        }, "Paste JSON", style), kNoTag, "design");
+    g->AttachControl(new IVButtonControl(rowIn(q, 70.f, 22.f),
+        [this](IControl*) { RebuildInstrument(true); }, "Revert to seed", style),
+        kNoTag, "design");
+  }
+}
+#endif // IPLUG_EDITOR
+
+void Seedlathe::SetOscCount(int n)
+{
+  n = std::clamp(n, 1, sl::kMaxOscs);
+  if (n == mEdit.oscCount) return;
+
+  // A new slot is a copy of the last one, not a default Osc. A default Osc has
+  // an all-zero gain envelope, so adding an oscillator would appear to do
+  // nothing at all until the user rebuilt its envelope by hand.
+  for (int i = mEdit.oscCount; i < n; ++i)
+    mEdit.oscs[static_cast<size_t>(i)] =
+        mEdit.oscs[static_cast<size_t>(std::max(0, mEdit.oscCount - 1))];
+
+  mEdit.oscCount = n;
+  if (mDesignOsc >= n) mDesignOsc = n - 1;
+  PushEdit();
+  SyncDesigner();
+}
+
+void Seedlathe::PushEdit()
+{
+  mEdited = true;
+  mPendingPublish = true;
+  ServicePending();
+  RefreshSeedDisplay();
+}
+
+namespace {
+// The shared rack is built entirely from each oscillator's delay and reverb
+// settings -- SharedFxRack::prewarm walks exactly those. Everything else in the
+// instrument is read per note, so it needs no rack work at all.
+bool sameFxConfig(const sl::Instrument& a, const sl::Instrument& b)
+{
+  if (a.oscCount != b.oscCount)
+    return false;
+  for (int i = 0; i < a.oscCount; ++i) {
+    const sl::Osc& x = a.oscs[static_cast<size_t>(i)];
+    const sl::Osc& y = b.oscs[static_cast<size_t>(i)];
+    if (x.del.on != y.del.on || x.del.time != y.del.time || x.del.feedback != y.del.feedback)
+      return false;
+    if (x.verb.on != y.verb.on || x.verb.duration != y.verb.duration || x.verb.decay != y.verb.decay)
+      return false;
+  }
+  return true;
+}
+} // namespace
+
+void Seedlathe::ServicePending()
+{
+  if (!mPendingPublish || !mPrepared)
+    return;
+
+  const int live = mLive.load(std::memory_order_relaxed);
+
+  // Dragging an envelope handle emits an edit per mouse move. Rebuilding a rack
+  // for each one would regenerate every reverb impulse -- an FFT per drag frame
+  // -- and would be refused whenever the racks were busy, so the edit would not
+  // be heard until the note ended. Only delay and reverb changes need the rack.
+  if (mRacksBuilt && sameFxConfig(mEdit, mInstruments[static_cast<size_t>(live)])) {
+    mInstruments[static_cast<size_t>(1 - live)] = mEdit;
+    mLive.store(1 - live, std::memory_order_release);
+    mPendingPublish = false;
+    return;
+  }
+
+  // Impulse generation and its FFTs happen here, on the message thread, and
+  // RackPool guarantees the rack it builds into is unreachable from audio.
+  if (!mRacks.rebuild(mEdit, mPool))
+    return;
+
+  mInstruments[static_cast<size_t>(1 - live)] = mEdit;
+  mLive.store(1 - live, std::memory_order_release);
+  mRacksBuilt = true;
+  mPendingPublish = false;
+}
+
+void Seedlathe::SyncDesigner()
+{
+#if IPLUG_EDITOR
+  if (!GetUI())
+    return;
+  for (auto* c : mDesignerControls)
+    c->Sync();
+  RefreshSeedDisplay();
+#endif
+}
 
 void Seedlathe::SetSeed(uint32_t seed)
 {
@@ -237,19 +592,28 @@ void Seedlathe::RefreshSeedDisplay()
   if (auto* c = ui->GetControlWithTag(kCtrlTagSeedBox))
     c->As<SeedBoxControl>()->SetSeed(seed);
 
+  // The label describes the edit buffer, not what is currently sounding: the
+  // two differ for as long as ServicePending is waiting for a free rack, and
+  // the controls the user is looking at show the edit buffer.
   if (auto* c = ui->GetControlWithTag(kCtrlTagTypeLabel)) {
-    const sl::Instrument& inst = mInstruments[mLive.load(std::memory_order_acquire)];
-    char buf[96];
-    std::snprintf(buf, sizeof(buf), "%s  -  %d oscillator%s%s",
-                  TypeName(inst.typeIndex), inst.oscCount,
-                  inst.oscCount == 1 ? "" : "s",
-                  inst.hasFmMatrix ? "  -  FM matrix" : "");
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "%s  -  %d oscillator%s%s%s",
+                  TypeName(mEdit.typeIndex), mEdit.oscCount,
+                  mEdit.oscCount == 1 ? "" : "s",
+                  mEdit.hasFmMatrix ? "  -  FM matrix" : "",
+                  mEdited ? "  -  edited" : "");
+    c->As<ITextControl>()->SetStr(buf);
+  }
+
+  if (auto* c = ui->GetControlWithTag(kCtrlTagOscCount)) {
+    char buf[48];
+    std::snprintf(buf, sizeof(buf), "%d of %d", mDesignOsc + 1, mEdit.oscCount);
     c->As<ITextControl>()->SetStr(buf);
   }
 #endif
 }
 
-void Seedlathe::RebuildInstrument()
+void Seedlathe::RebuildInstrument(bool force)
 {
   // iPlug2 fires OnParamChange while the plugin is still being constructed,
   // before OnReset has run, so there is a window where the rack has no pools
@@ -259,22 +623,19 @@ void Seedlathe::RebuildInstrument()
 
   const auto seed = sl::seedFrom(GetParam(sl::kSeedHi)->Int(),
                                  GetParam(sl::kSeedLo)->Int());
-  if (seed == mCurrentSeed)
+  // `force` is Revert to seed: the seed has not moved, but the edit buffer has
+  // to be thrown away and regenerated from it.
+  if (mHasSeed && seed == mCurrentSeed && !force)
     return;
 
-  const int next = 1 - mLive.load(std::memory_order_relaxed);
-  const sl::Instrument candidate = sl::generateInstrument(seed);
-
-  // Impulse generation and its FFTs happen here, on the message thread, and
-  // RackPool guarantees the rack it builds into is unreachable from audio.
-  // A refusal means every rack is still sounding; the next parameter change
-  // retries, so dragging the control simply coalesces.
-  if (!mRacks.rebuild(candidate, mPool))
-    return;
-
-  mInstruments[next] = candidate;
-  mLive.store(next, std::memory_order_release);
+  mEdit = sl::generateInstrument(seed);
+  mEdited = false;
   mCurrentSeed = seed;
+  mHasSeed = true;
+  mDesignOsc = 0;
+  mPendingPublish = true;
+  ServicePending();
+  SyncDesigner();
 }
 
 void Seedlathe::OnReset()
@@ -294,8 +655,66 @@ void Seedlathe::OnReset()
   mRight.assign(blockCap, 0.f);
 
   mPrepared = true;
-  mCurrentSeed = 0xFFFFFFFFu;
-  RebuildInstrument();
+  // prepare() reallocated every rack at the new sample rate, so none of them
+  // holds an impulse for the current patch any more.
+  mRacksBuilt = false;
+
+  // A restored patch must survive this. OnReset also runs after
+  // UnserializeState, and regenerating from the seed there would silently
+  // discard every designer edit the host just handed back.
+  if (mEdited) {
+    mPendingPublish = true;
+    ServicePending();
+    SyncDesigner();
+  } else {
+    mHasSeed = false;
+    RebuildInstrument();
+  }
+}
+
+bool Seedlathe::SerializeState(IByteChunk& chunk) const
+{
+  if (!SerializeParams(chunk))
+    return false;
+
+  // Empty for an unedited patch: the seed alone reproduces it, and storing the
+  // generated instrument as well would mean two sources of truth that a future
+  // generator change could put out of step.
+  const std::string json = mEdited ? sl::instrumentToJson(mEdit).dump() : std::string();
+  return chunk.PutStr(json.c_str()) > 0;
+}
+
+int Seedlathe::UnserializeState(const IByteChunk& chunk, int startPos)
+{
+  // This regenerates mEdit from the restored seed as a side effect of
+  // OnParamChange, which is exactly the state an unedited patch wants.
+  int pos = UnserializeParams(chunk, startPos);
+
+  WDL_String json;
+  const int next = chunk.GetStr(json, pos);
+  if (next < 0)
+    return pos;   // state written before the designer existed
+  pos = next;
+
+  if (json.GetLength() == 0) {
+    mEdited = false;
+    return pos;
+  }
+
+  sl::Instrument parsed;
+  try {
+    parsed = sl::instrumentFromJson(nlohmann::json::parse(json.Get()));
+  } catch (const std::exception&) {
+    return pos;   // keep the seed's instrument rather than load a broken one
+  }
+
+  mEdit = parsed;
+  mEdited = true;
+  mDesignOsc = 0;
+  mPendingPublish = true;
+  ServicePending();
+  SyncDesigner();
+  return pos;
 }
 
 void Seedlathe::OnParamChange(int paramIdx)
@@ -309,6 +728,10 @@ void Seedlathe::OnParamChange(int paramIdx)
 void Seedlathe::OnIdle()
 {
   mScopeSender.TransmitData(*this);
+
+  // A rebuild refused because every rack was still sounding. Retry now that
+  // some of them have had time to fall silent.
+  ServicePending();
 
 #if IPLUG_EDITOR
   auto* ui = GetUI();

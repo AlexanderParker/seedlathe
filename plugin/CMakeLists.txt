@@ -13,6 +13,7 @@ iplug_add_plugin(Seedlathe
     Seedlathe.h
     config.h
     SeedlatheControls.h
+    SeedlatheDesigner.h
     SeedlatheParams.h
     resources/resource.h
   RESOURCES

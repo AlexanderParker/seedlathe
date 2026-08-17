@@ -6,6 +6,7 @@
 #include "IVTabbedPagesControl.h"
 
 #include "SeedlatheControls.h"
+#include "SeedlatheDesigner.h"
 #include "SeedlatheParams.h"
 #include "RackPool.h"
 #include "SeedSearch.h"
@@ -29,6 +30,8 @@ enum EControlTags
   kCtrlTagPresetList,
   kCtrlTagSearchStatus,
   kCtrlTagResultList,
+  kCtrlTagOscSelect,
+  kCtrlTagOscCount,
   kNumCtrlTags
 };
 
@@ -47,13 +50,38 @@ public:
   void OnParamChange(int paramIdx) override;
   void OnIdle() override;
 
+  // The designer edits an instrument, not a parameter list, so the edit has to
+  // travel in the state chunk. Params still carry the seed -- they are the
+  // authoritative source for it -- and the chunk carries only the deviation
+  // from what that seed generates.
+  bool SerializeState(IByteChunk& chunk) const override;
+  int UnserializeState(const IByteChunk& chunk, int startPos) override;
+
 private:
-  // Rebuilds the instrument from the current Seed Hi/Lo and prewarms its
-  // reverbs. Message thread only -- prewarming allocates.
-  void RebuildInstrument();
+  // Regenerates the edit buffer from the current Seed Hi/Lo, discarding any
+  // designer edits, and queues it for publication. Message thread only.
+  void RebuildInstrument(bool force = false);
   void SetSeed(uint32_t seed);
   void RollRandomSeed();
   void RefreshSeedDisplay();
+
+  // The designer changed mEdit: mark it edited and queue publication.
+  void PushEdit();
+
+  // Tries to hand mEdit to the audio thread. RackPool may refuse -- every rack
+  // is still sounding -- in which case the request stays queued and OnIdle
+  // retries. Without the queue, the last value of a drag could be dropped: the
+  // refusals during the drag coalesce harmlessly, but a refusal on the final
+  // value would leave the sound permanently out of step with the controls.
+  void ServicePending();
+
+  // Re-reads every designer control from mEdit. Called after anything replaces
+  // the instrument wholesale -- seed change, preset load, oscillator switch.
+  void SyncDesigner();
+
+  void SetOscCount(int n);
+  void BuildDesigner(IGraphics* g, const IRECT& page, const IVStyle& style);
+  sl::Osc& EditOsc();
 
   // A pool of racks, not one. Rebuilding a rack frees and reallocates every
   // buffer inside it, so it may only ever target a rack the audio thread
@@ -71,8 +99,22 @@ private:
   std::array<sl::Instrument, 2> mInstruments{};
   std::atomic<int> mLive{0};
 
+  // The designer's working copy. Edits land here, then ServicePending hands a
+  // snapshot to the audio thread through the double buffer above.
+  sl::Instrument mEdit{};
+  bool mEdited = false;
+  bool mPendingPublish = false;
+  int mDesignOsc = 0;
+
+  // Gathered during layout so the designer can be refreshed without RTTI.
+  // Cleared at the top of the layout function, and only used while GetUI() is
+  // non-null, so a closed editor cannot leave dangling entries behind.
+  std::vector<seedlathe::DesignerControl*> mDesignerControls;
+
   std::vector<float> mLeft, mRight;
-  uint32_t mCurrentSeed = 0xFFFFFFFFu;
+  uint32_t mCurrentSeed = 0;
+  bool mHasSeed = false;
+  bool mRacksBuilt = false;
   int mPreparedVoices = 0;
   bool mPrepared = false;
 
