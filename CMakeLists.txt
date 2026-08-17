@@ -45,3 +45,12 @@ endif()
 
 enable_testing()
 add_subdirectory(tests)
+
+# Small CLI for auditioning a seed without a DAW.
+add_executable(sl_render tools/sl_render.cpp)
+target_link_libraries(sl_render PRIVATE sl_core)
+target_compile_options(sl_render PRIVATE ${SEEDLATHE_WARNINGS})
+set_target_properties(sl_render PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/out"
+  RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/out"
+  RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/out")

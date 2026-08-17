@@ -59,3 +59,47 @@ plugin appears in your DAW's scan after every build.
 - **VST3 target requires Steinberg's VST3 SDK** (dual GPLv3 / proprietary). The
   proprietary option is free but requires signing Steinberg's agreement. Settle this
   before distributing any VST3 binary; CLAP and standalone are unaffected.
+
+## Running it
+
+Three ways, in increasing order of setup.
+
+### 1. Render a seed to a WAV (no DAW, no MIDI needed)
+
+```
+build/out/sl_render.exe 3703184240 forest.wav --seconds 3
+```
+
+Options: `--note N` (0 is middle C), `--gain G` (0..1), `--seconds S`,
+`--rate R`, `--json` to also print the generated instrument.
+
+This is the quickest way to A/B against
+[the demo page](https://alexanderparker.github.io/zyn/) — load the same seed
+there and compare.
+
+### 2. Standalone app
+
+Run `build/out/Seedlathe.exe`. **Click the on-screen keyboard** to play —
+it sends real MIDI internally, so no controller is required. Set the seed with
+the two number boxes: a 32-bit seed is split across `Seed Hi` and `Seed Lo`
+(see `plugin/SeedlatheParams.h` for why), so
+
+```
+seed = SeedHi * 65536 + SeedLo
+```
+
+For example seed 3703184240 is `Seed Hi 56506`, `Seed Lo 7024`.
+
+If you hear nothing, open the app's **Preferences** dialog and pick the right
+audio output device and sample rate.
+
+### 3. In a DAW
+
+Every build copies the plugin into your system folders, so it is already
+installed:
+
+- VST3: `%LOCALAPPDATA%\Programs\Common\VST3\Seedlathe.vst3`
+- CLAP: `%LOCALAPPDATA%\Programs\Common\CLAP\Seedlathe.clap`
+
+Rescan plugins in your DAW, add Seedlathe to an instrument track, and play.
+It responds to note on/off, velocity, and all-notes-off.
