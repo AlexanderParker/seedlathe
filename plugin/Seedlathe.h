@@ -10,6 +10,7 @@
 #include "SeedlatheParams.h"
 #include "RackPool.h"
 #include "SampleMatch.h"
+#include "UserPresets.h"
 #include "SeedSearch.h"
 #include "SharedFxRack.h"
 #include "Voice.h"
@@ -37,6 +38,7 @@ enum EControlTags
   kCtrlTagSampleInfo,
   kCtrlTagSampleStatus,
   kCtrlTagExportStatus,
+  kCtrlTagPresetStatus,
   kNumCtrlTags
 };
 
@@ -91,6 +93,15 @@ private:
   void LoadSampleTarget();
   void ExportWav();
   void RefreshSampleInfo();
+
+  // Preset list and the user's own bank. Editor-only: they exist to drive
+  // controls, and a DSP-only build has no list to refresh.
+  void RefreshPresetList();
+  void SetPresetStatus(const char* text);
+  void LoadPreset(int payload);
+  void PromptSavePreset();
+  void PromptRenamePreset();
+  void DeleteSelectedPreset();
   sl::Osc& EditOsc();
 
   // A pool of racks, not one. Rebuilding a rack frees and reallocates every
@@ -110,6 +121,10 @@ private:
   bool mSampleSearchWasRunning = false;
   std::string mSampleName;
   std::string mSampleError;
+
+  sl::UserPresetStore mUserPresets;
+  std::string mSelectedUserPreset;
+  seedlathe::TextPromptControl* mPrompt = nullptr;
 
   // Double buffer: the message thread writes the inactive slot and flips the
   // index, the audio thread only ever reads the published one.

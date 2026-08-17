@@ -74,6 +74,18 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
                                       "Any", "Pad", "Lead", "Bass", "Key", "Pluck",
                                       "Bell", "String", "Drum", "Perc", "FX");
 
+  // Presets live beside the host's own plugin data rather than next to the
+  // binary: a VST3 folder is often read-only, and on Windows it is under
+  // Program Files, where a write would be silently redirected per user anyway.
+  {
+    WDL_String dir;
+    AppSupportPath(dir);
+    // Forward slashes on every platform: the Win32 file APIs and
+    // std::filesystem both accept them, so the path needs no separator switch.
+    dir.Append("/Seedlathe/Presets");
+    mUserPresets.open(dir.Get());
+  }
+
 #if IPLUG_EDITOR
   mMakeGraphicsFunc = [&]() {
     return MakeGraphics(*this, PLUG_WIDTH, PLUG_HEIGHT, PLUG_FPS,
@@ -86,6 +98,10 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
     // The previous editor's controls are gone; their pointers must not outlive
     // it. This runs on every editor open, before anything is attached.
     mDesignerControls.clear();
+    mPrompt = nullptr;
+
+    // Another instance may have saved something since this editor last opened.
+    mUserPresets.refresh();
 
     g->AttachPanelBackground(kBg);
     g->EnableMouseOver(true);
@@ -147,34 +163,29 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
                      kCtrlTagScope, "instrument");
 
     // -- Presets
-    g->AttachControl(new ITextControl(page.GetFromTop(20.f),
-        "Factory bank -- 115 presets, grouped by instrument type",
-        IText(12.f, kDim)), kNoTag, "presets");
     {
-      auto* list = new ListControl(page.GetReducedFromTop(24.f), [this](int payload) {
-        const auto& p = sl::kFactoryPresets[payload];
-        SetSeed(p.seed);
-        GetParam(sl::kOctave)->Set(std::clamp(p.octave, -3, 3));
-        SendParameterValueFromDelegate(sl::kOctave,
-                                       GetParam(sl::kOctave)->GetNormalized(), true);
-      });
+      const IRECT bar = page.GetFromTop(30.f);
+      g->AttachControl(new IVButtonControl(bar.GetFromLeft(150.f).GetPadded(-3.f),
+          [this](IControl*) { PromptSavePreset(); }, "Save current...", style),
+          kNoTag, "presets");
+      g->AttachControl(new IVButtonControl(
+          bar.GetReducedFromLeft(150.f).GetFromLeft(110.f).GetPadded(-3.f),
+          [this](IControl*) { PromptRenamePreset(); }, "Rename...", style),
+          kNoTag, "presets");
+      g->AttachControl(new IVButtonControl(
+          bar.GetReducedFromLeft(260.f).GetFromLeft(110.f).GetPadded(-3.f),
+          [this](IControl*) { DeleteSelectedPreset(); }, "Delete", style),
+          kNoTag, "presets");
+      g->AttachControl(new ITextControl(bar.GetReducedFromLeft(380.f),
+          "", IText(12.f, kDim, nullptr, EAlign::Near)),
+          kCtrlTagPresetStatus, "presets");
 
-      // Grouped by instrument type, in type order, as the demo page does.
-      std::vector<ListControl::Row> rows;
-      for (int t = 0; t < 10; ++t) {
-        bool header = false;
-        for (int i = 0; i < sl::kNumFactoryPresets; ++i) {
-          const auto& p = sl::kFactoryPresets[i];
-          if (p.typeIndex != t) continue;
-          if (!header) { rows.push_back({TypeName(t), "", true, -1}); header = true; }
-          char detail[32];
-          std::snprintf(detail, sizeof(detail), "%u", p.seed);
-          rows.push_back({p.name, detail, false, i});
-        }
-      }
-      list->SetRows(std::move(rows));
+      auto* list = new ListControl(page.GetReducedFromTop(34.f),
+                                   [this](int payload) { LoadPreset(payload); });
       g->AttachControl(list, kCtrlTagPresetList, "presets");
     }
+
+    g->AttachControl(mPrompt = new seedlathe::TextPromptControl());
 
     // -- Search
     g->AttachControl(new ITextControl(page.GetFromTop(46.f),
@@ -211,6 +222,7 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
     // ---- keyboard ------------------------------------------------------
     g->AttachControl(new IVKeyboardControl(keys), kCtrlTagKeyboard);
 
+    RefreshPresetList();
     RefreshSeedDisplay();
   };
 #endif
@@ -558,6 +570,176 @@ void Seedlathe::SyncDesigner()
   RefreshSeedDisplay();
 #endif
 }
+
+#if IPLUG_EDITOR
+
+// User presets sort above the factory bank and their payloads are offset past
+// it, so one list can carry both without the picker having to know which list
+// row came from where.
+static constexpr int kUserPresetBase = 100000;
+
+void Seedlathe::RefreshPresetList()
+{
+  auto* ui = GetUI();
+  if (!ui) return;
+  auto* c = ui->GetControlWithTag(kCtrlTagPresetList);
+  if (!c) return;
+
+  std::vector<ListControl::Row> rows;
+
+  const auto& user = mUserPresets.presets();
+  if (!user.empty()) {
+    rows.push_back({"Your presets", "", true, -1});
+    for (size_t i = 0; i < user.size(); ++i) {
+      char detail[64];
+      std::snprintf(detail, sizeof(detail), "%u%s", user[i].seed,
+                    user[i].edited ? "  edited" : "");
+      rows.push_back({user[i].name, detail, false,
+                      kUserPresetBase + static_cast<int>(i)});
+    }
+  }
+
+  // Grouped by instrument type, in type order, as the demo page does.
+  for (int t = 0; t < 10; ++t) {
+    bool header = false;
+    for (int i = 0; i < sl::kNumFactoryPresets; ++i) {
+      const auto& p = sl::kFactoryPresets[i];
+      if (p.typeIndex != t) continue;
+      if (!header) { rows.push_back({TypeName(t), "", true, -1}); header = true; }
+      char detail[32];
+      std::snprintf(detail, sizeof(detail), "%u", p.seed);
+      rows.push_back({p.name, detail, false, i});
+    }
+  }
+
+  c->As<ListControl>()->SetRows(std::move(rows));
+}
+
+void Seedlathe::SetPresetStatus(const char* text)
+{
+  auto* ui = GetUI();
+  if (!ui) return;
+  if (auto* c = ui->GetControlWithTag(kCtrlTagPresetStatus))
+    c->As<ITextControl>()->SetStr(text ? text : "");
+}
+
+void Seedlathe::LoadPreset(int payload)
+{
+  if (payload >= kUserPresetBase) {
+    const size_t i = static_cast<size_t>(payload - kUserPresetBase);
+    if (i >= mUserPresets.presets().size()) return;
+    const sl::UserPreset& p = mUserPresets.presets()[i];
+    mSelectedUserPreset = p.name;
+
+    SetSeed(p.seed);
+    // The seed load has already regenerated mEdit, so the stored instrument
+    // goes on top of it -- and only when the preset actually holds one.
+    if (p.edited) {
+      mEdit = p.instrument;
+      mDesignOsc = 0;
+      PushEdit();
+      SyncDesigner();
+    }
+    GetParam(sl::kOctave)->Set(std::clamp(p.octave, -3, 3));
+    SendParameterValueFromDelegate(sl::kOctave,
+                                   GetParam(sl::kOctave)->GetNormalized(), true);
+    SetPresetStatus("");
+    return;
+  }
+
+  if (payload < 0 || payload >= sl::kNumFactoryPresets) return;
+  const auto& p = sl::kFactoryPresets[payload];
+  mSelectedUserPreset.clear();
+  SetSeed(p.seed);
+  GetParam(sl::kOctave)->Set(std::clamp(p.octave, -3, 3));
+  SendParameterValueFromDelegate(sl::kOctave,
+                                 GetParam(sl::kOctave)->GetNormalized(), true);
+  SetPresetStatus("");
+}
+
+void Seedlathe::PromptSavePreset()
+{
+  auto* ui = GetUI();
+  if (!ui || !mPrompt) return;
+  if (!mUserPresets.ready()) {
+    SetPresetStatus(mUserPresets.error().empty()
+                        ? "No writable preset folder"
+                        : mUserPresets.error().c_str());
+    return;
+  }
+
+  char suggested[64];
+  if (!mSelectedUserPreset.empty())
+    std::snprintf(suggested, sizeof(suggested), "%s", mSelectedUserPreset.c_str());
+  else
+    std::snprintf(suggested, sizeof(suggested), "%s %u", TypeName(mEdit.typeIndex),
+                  mCurrentSeed);
+
+  mPrompt->Prompt(GetUI()->GetBounds().GetCentredInside(320.f, 30.f), suggested,
+                  [this](const char* text) {
+                    sl::UserPreset p;
+                    p.name = sl::sanitisePresetName(text);
+                    p.seed = mCurrentSeed;
+                    p.octave = GetParam(sl::kOctave)->Int();
+                    p.edited = mEdited;
+                    p.instrument = mEdit;
+
+                    char buf[192];
+                    if (mUserPresets.save(p)) {
+                      mSelectedUserPreset = p.name;
+                      std::snprintf(buf, sizeof(buf), "Saved \"%s\"", p.name.c_str());
+                    } else {
+                      std::snprintf(buf, sizeof(buf), "%s", mUserPresets.error().c_str());
+                    }
+                    RefreshPresetList();
+                    SetPresetStatus(buf);
+                  });
+}
+
+void Seedlathe::PromptRenamePreset()
+{
+  auto* ui = GetUI();
+  if (!ui || !mPrompt) return;
+  if (mSelectedUserPreset.empty()) {
+    SetPresetStatus("Select one of your presets first");
+    return;
+  }
+
+  const std::string from = mSelectedUserPreset;
+  mPrompt->Prompt(GetUI()->GetBounds().GetCentredInside(320.f, 30.f), from.c_str(),
+                  [this, from](const char* text) {
+                    const std::string to = sl::sanitisePresetName(text);
+                    char buf[192];
+                    if (mUserPresets.rename(from, to)) {
+                      mSelectedUserPreset = to;
+                      std::snprintf(buf, sizeof(buf), "Renamed to \"%s\"", to.c_str());
+                    } else {
+                      std::snprintf(buf, sizeof(buf), "%s", mUserPresets.error().c_str());
+                    }
+                    RefreshPresetList();
+                    SetPresetStatus(buf);
+                  });
+}
+
+void Seedlathe::DeleteSelectedPreset()
+{
+  if (mSelectedUserPreset.empty()) {
+    SetPresetStatus("Select one of your presets first");
+    return;
+  }
+
+  char buf[192];
+  if (mUserPresets.remove(mSelectedUserPreset))
+    std::snprintf(buf, sizeof(buf), "Deleted \"%s\"", mSelectedUserPreset.c_str());
+  else
+    std::snprintf(buf, sizeof(buf), "%s", mUserPresets.error().c_str());
+
+  mSelectedUserPreset.clear();
+  RefreshPresetList();
+  SetPresetStatus(buf);
+}
+
+#endif // IPLUG_EDITOR
 
 void Seedlathe::BuildSamplePage(IGraphics* g, const IRECT& page, const IVStyle& style)
 {

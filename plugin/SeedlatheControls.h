@@ -165,6 +165,36 @@ private:
     int mSelected = 0;
 };
 
+// Text entry that is not attached to a parameter.
+//
+// IGraphics only delivers OnTextEntryCompletion to the control that opened the
+// entry, so asking the user for a preset name needs a control to own the
+// callback. This one draws nothing and exists purely to be that owner, which
+// keeps every caller from having to grow its own text-entry plumbing.
+class TextPromptControl : public IControl {
+public:
+    using DoneFunc = std::function<void(const char* text)>;
+
+    TextPromptControl() : IControl(IRECT()) { mIgnoreMouse = true; }
+
+    void Prompt(const IRECT& where, const char* initial, DoneFunc done) {
+        mDone = std::move(done);
+        GetUI()->CreateTextEntry(*this, IText(14.f), where, initial ? initial : "");
+    }
+
+    void Draw(IGraphics&) override {}
+
+    void OnTextEntryCompletion(const char* str, int) override {
+        // Cancelling hands back an empty string; treat that as "no change"
+        // rather than as a preset named "".
+        if (mDone && str && *str) mDone(str);
+        mDone = nullptr;
+    }
+
+private:
+    DoneFunc mDone;
+};
+
 // A scrolling, grouped list. Used for the factory bank and for search results,
 // which want the same behaviour: many rows, one selected, click to audition.
 class ListControl : public IControl {

@@ -19,6 +19,7 @@ add_executable(sl_tests
   test_seedchange.cpp
   test_seedsearch.cpp
   test_samplematch.cpp
+  test_userpresets.cpp
   test_perf.cpp
 )
 
