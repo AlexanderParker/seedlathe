@@ -3,12 +3,15 @@
 
 #include "sl/FactoryPresets.h"
 #include "sl/InstrumentGen.h"
+#include "OfflineRender.h"
 #include "PresetIO.h"
+#include "SampleMatch.h"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <pmmintrin.h>
 #include <vector>
 #include <xmmintrin.h>
@@ -128,10 +131,10 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
     const IRECT page = mid.GetReducedFromTop(36.f);
 
     g->AttachControl(new TabBarControl(
-        tabBar, {"Instrument", "Presets", "Search", "Design"},
+        tabBar, {"Instrument", "Presets", "Search", "Sample", "Design"},
         [g](int index) {
-          static const char* kGroups[] = {"instrument", "presets", "search", "design"};
-          for (int i = 0; i < 4; ++i)
+          static const char* kGroups[] = {"instrument", "presets", "search", "sample", "design"};
+          for (int i = 0; i < 5; ++i)
             g->ForControlInGroup(kGroups[i], [i, index](IControl* c) { c->Hide(i != index); });
         }));
 
@@ -195,11 +198,14 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
           "Idle", IText(15.f, kTextCol)), kCtrlTagSearchStatus, "search");
     }
 
+    // -- Sample match and WAV export
+    BuildSamplePage(g, page, style);
+
     // -- Design
     BuildDesigner(g, page, style);
 
     // Everything but the first page starts hidden.
-    for (const char* grp : {"presets", "search", "design"})
+    for (const char* grp : {"presets", "search", "sample", "design"})
       g->ForControlInGroup(grp, [](IControl* c) { c->Hide(true); });
 
     // ---- keyboard ------------------------------------------------------
@@ -553,6 +559,131 @@ void Seedlathe::SyncDesigner()
 #endif
 }
 
+void Seedlathe::BuildSamplePage(IGraphics* g, const IRECT& page, const IVStyle& style)
+{
+  g->AttachControl(new ITextControl(page.GetFromTop(52.f),
+      "Load a sound and search seeds for the closest match. Every candidate is "
+      "rendered and compared on\ntimbre, amplitude shape and brightness, so this "
+      "runs at hundreds of seeds a second, not millions.",
+      IText(12.f, kDim)), kNoTag, "sample");
+
+  const IRECT loadRow = page.GetReducedFromTop(56.f).GetFromTop(34.f).GetFromLeft(560.f);
+  g->AttachControl(new IVButtonControl(loadRow.GetFromLeft(180.f).GetPadded(-4.f),
+      [this](IControl*) { LoadSampleTarget(); }, "Load sample...", style),
+      kNoTag, "sample");
+  g->AttachControl(new ITextControl(loadRow.GetReducedFromLeft(190.f),
+      "No sample loaded", IText(13.f, kTextCol, nullptr, EAlign::Near)),
+      kCtrlTagSampleInfo, "sample");
+
+  const IRECT row = page.GetReducedFromTop(100.f).GetFromTop(36.f).GetFromLeft(560.f);
+  g->AttachControl(new IVButtonControl(row.GetGridCell(0, 1, 3).GetPadded(-4.f),
+      [this](IControl*) {
+        mSampleSearch.start(GetParam(sl::kTypeFilter)->Int(), 0.0);
+      }, "Search", style), kNoTag, "sample");
+  g->AttachControl(new IVButtonControl(row.GetGridCell(1, 1, 3).GetPadded(-4.f),
+      [this](IControl*) {
+        // A lower bar than the parameter-space search: an unrelated recording
+        // and a seed will never agree the way two seeds can.
+        mSampleSearch.start(GetParam(sl::kTypeFilter)->Int(), 85.0);
+      }, "Search until 85%", style), kNoTag, "sample");
+  g->AttachControl(new IVButtonControl(row.GetGridCell(2, 1, 3).GetPadded(-4.f),
+      [this](IControl*) { mSampleSearch.cancel(); }, "Stop", style), kNoTag, "sample");
+
+  g->AttachControl(new ITextControl(page.GetReducedFromTop(144.f).GetFromTop(28.f),
+      "Idle", IText(15.f, kTextCol)), kCtrlTagSampleStatus, "sample");
+
+  g->AttachControl(new ITextControl(page.GetReducedFromTop(180.f).GetFromTop(40.f),
+      "The Roll type knob restricts which instrument type is searched.\n"
+      "Candidates are rendered at the sample's detected pitch.",
+      IText(12.f, IColor(255, 110, 118, 130))), kNoTag, "sample");
+
+  // ---- export ------------------------------------------------------------
+  const IRECT exportTop = page.GetReducedFromTop(240.f);
+  g->AttachControl(new ITextControl(exportTop.GetFromTop(24.f),
+      "Export the current instrument as a 32-bit float stereo WAV.",
+      IText(12.f, kDim)), kNoTag, "sample");
+  g->AttachControl(new IVButtonControl(
+      exportTop.GetReducedFromTop(28.f).GetFromTop(34.f).GetFromLeft(180.f).GetPadded(-4.f),
+      [this](IControl*) { ExportWav(); }, "Export WAV...", style), kNoTag, "sample");
+  g->AttachControl(new ITextControl(
+      exportTop.GetReducedFromTop(28.f).GetFromTop(34.f).GetReducedFromLeft(190.f),
+      "", IText(13.f, kTextCol, nullptr, EAlign::Near)), kCtrlTagExportStatus, "sample");
+}
+
+void Seedlathe::LoadSampleTarget()
+{
+  auto* ui = GetUI();
+  if (!ui) return;
+
+  WDL_String file, dir;
+  ui->PromptForFile(file, dir, EFileAction::Open, "wav");
+  if (!file.GetLength()) return;
+
+  // Reading and analysing a file happens on the message thread. It is bounded
+  // -- one resample and one spectrogram over 1.5 s of audio -- and doing it on
+  // a worker would only add a handshake for something the user is waiting on.
+  const bool ok = mSampleSearch.loadTarget(file.Get());
+
+  const char* slash = std::strrchr(file.Get(), '\\');
+  if (!slash) slash = std::strrchr(file.Get(), '/');
+  mSampleName = slash ? slash + 1 : file.Get();
+  mSampleError = ok ? std::string() : mSampleSearch.error();
+  RefreshSampleInfo();
+}
+
+void Seedlathe::ExportWav()
+{
+  auto* ui = GetUI();
+  if (!ui) return;
+
+  WDL_String file, dir;
+  char suggested[64];
+  std::snprintf(suggested, sizeof(suggested), "seedlathe-%u.wav", mCurrentSeed);
+  file.Set(suggested);
+  ui->PromptForFile(file, dir, EFileAction::Save, "wav");
+  if (!file.GetLength()) return;
+
+  // Rendered offline rather than captured from the audio thread, so the file
+  // is the same every time and does not depend on what the host was doing.
+  // Four seconds covers the longest generated reverb tail with room to spare.
+  const sl::RenderResult r = sl::renderOffline(mEdit, GetParam(sl::kOctave)->Int() * 12,
+                                               1.0, 4.0, GetSampleRate());
+  const bool ok = sl::writeWav(file.Get(), r, GetSampleRate());
+
+  if (auto* c = ui->GetControlWithTag(kCtrlTagExportStatus)) {
+    char buf[160];
+    if (ok) {
+      const char* slash = std::strrchr(file.Get(), '\\');
+      if (!slash) slash = std::strrchr(file.Get(), '/');
+      std::snprintf(buf, sizeof(buf), "Wrote %s", slash ? slash + 1 : file.Get());
+    } else {
+      std::snprintf(buf, sizeof(buf), "Could not write that file");
+    }
+    c->As<ITextControl>()->SetStr(buf);
+  }
+}
+
+void Seedlathe::RefreshSampleInfo()
+{
+#if IPLUG_EDITOR
+  auto* ui = GetUI();
+  if (!ui) return;
+  auto* c = ui->GetControlWithTag(kCtrlTagSampleInfo);
+  if (!c) return;
+
+  char buf[256];
+  if (!mSampleError.empty())
+    std::snprintf(buf, sizeof(buf), "%s  -  %s", mSampleName.c_str(), mSampleError.c_str());
+  else if (mSampleSearch.hasTarget())
+    std::snprintf(buf, sizeof(buf), "%s  -  root note %+d", mSampleName.c_str(),
+                  mSampleSearch.target().rootNote);
+  else
+    std::snprintf(buf, sizeof(buf), "No sample loaded");
+
+  c->As<ITextControl>()->SetStr(buf);
+#endif
+}
+
 void Seedlathe::SetSeed(uint32_t seed)
 {
   GetParam(sl::kSeedHi)->Set(sl::seedHi(seed));
@@ -758,6 +889,29 @@ void Seedlathe::OnIdle()
     SetSeed(best.seed);
 
   mSearchWasRunning = running;
+
+  // ---- sample match ------------------------------------------------------
+  const bool sampleRunning = mSampleSearch.running();
+  const auto sampleBest = mSampleSearch.best();
+
+  if (sampleRunning || mSampleSearchWasRunning) {
+    if (auto* c = ui->GetControlWithTag(kCtrlTagSampleStatus)) {
+      char buf[192];
+      if (sampleBest.found)
+        std::snprintf(buf, sizeof(buf), "%s  -  best %.1f%%  seed %u  (%llu rendered)",
+                      sampleRunning ? "Searching" : "Done", sampleBest.score,
+                      sampleBest.seed,
+                      static_cast<unsigned long long>(sampleBest.tested));
+      else
+        std::snprintf(buf, sizeof(buf), "%s...", sampleRunning ? "Searching" : "Idle");
+      c->As<ITextControl>()->SetStr(buf);
+    }
+  }
+
+  if (mSampleSearchWasRunning && !sampleRunning && sampleBest.found)
+    SetSeed(sampleBest.seed);
+
+  mSampleSearchWasRunning = sampleRunning;
 #endif
 }
 

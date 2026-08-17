@@ -9,6 +9,7 @@
 #include "SeedlatheDesigner.h"
 #include "SeedlatheParams.h"
 #include "RackPool.h"
+#include "SampleMatch.h"
 #include "SeedSearch.h"
 #include "SharedFxRack.h"
 #include "Voice.h"
@@ -16,6 +17,7 @@
 #include "webaudio/WaCompressor.h"
 
 #include <array>
+#include <string>
 #include <atomic>
 #include <vector>
 
@@ -32,6 +34,9 @@ enum EControlTags
   kCtrlTagResultList,
   kCtrlTagOscSelect,
   kCtrlTagOscCount,
+  kCtrlTagSampleInfo,
+  kCtrlTagSampleStatus,
+  kCtrlTagExportStatus,
   kNumCtrlTags
 };
 
@@ -81,6 +86,11 @@ private:
 
   void SetOscCount(int n);
   void BuildDesigner(IGraphics* g, const IRECT& page, const IVStyle& style);
+  void BuildSamplePage(IGraphics* g, const IRECT& page, const IVStyle& style);
+
+  void LoadSampleTarget();
+  void ExportWav();
+  void RefreshSampleInfo();
   sl::Osc& EditOsc();
 
   // A pool of racks, not one. Rebuilding a rack frees and reallocates every
@@ -93,6 +103,13 @@ private:
   sl::VoicePool mPool;
   sl::WaCompressor mComp;
   sl::SeedSearchRunner mSearch;
+
+  // Sample matching renders every candidate, so it runs on its own pool rather
+  // than sharing the parameter-space search's single thread.
+  sl::SampleSearchRunner mSampleSearch;
+  bool mSampleSearchWasRunning = false;
+  std::string mSampleName;
+  std::string mSampleError;
 
   // Double buffer: the message thread writes the inactive slot and flips the
   // index, the audio thread only ever reads the published one.
