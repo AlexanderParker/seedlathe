@@ -5,6 +5,7 @@ add_library(sl_core STATIC
   src/webaudio/WaOscillator.cpp
   src/webaudio/WaBiquad.cpp
   src/webaudio/WaNodes.cpp
+  src/webaudio/WaConvolver.cpp
   src/webaudio/WaCompressor.cpp
   src/SharedFxRack.cpp
   src/Voice.cpp

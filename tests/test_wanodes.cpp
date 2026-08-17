@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "webaudio/WaNodes.h"
+#include "sl/Mulberry32.h"
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -146,4 +147,48 @@ TEST_CASE("shaper maps the curve and stays bounded") {
 TEST_CASE("shaper with no curve set is transparent") {
     sl::WaShaper s;
     REQUIRE(s.process(0.42) == 0.42);
+}
+
+TEST_CASE("convolver matches brute-force direct convolution") {
+    // The correctness proof for non-uniform partitioning, and it must convolve
+    // against an INDEPENDENTLY generated impulse. An earlier version recovered
+    // the impulse from the convolver itself, which only proved the engine
+    // agreed with itself -- it passed while a whole segment of the tail was
+    // arriving 24576 samples early.
+    const double sr = 48000.0;
+    const uint32_t seed = 4242u;
+
+    // Long enough to span the direct head and several FFT segments, including
+    // one past the block-size cap where the output delay compensation applies.
+    for (double duration : {0.005, 0.05, 0.5, 1.2}) {
+        const std::vector<float> h = sl::makeReverbImpulse(duration, 0.7, seed, sr);
+
+        sl::WaConvolver c;
+        c.prepare(sr);
+        c.buildImpulse(duration, 0.7, seed);
+        REQUIRE(c.ready());
+
+        std::vector<double> x(4000);
+        sl::Mulberry32 rng(99u);
+        for (auto& v : x) v = rng(2.0) - 1.0;
+
+        std::vector<double> got(x.size());
+        for (size_t i = 0; i < x.size(); ++i) {
+            double l, r;
+            c.process(x[i], x[i], l, r);
+            got[i] = l;
+        }
+
+        double worst = 0.0, peak = 0.0;
+        for (size_t i = 0; i < x.size(); ++i) {
+            double want = 0.0;
+            const size_t kMax = std::min(i + 1, h.size());
+            for (size_t k = 0; k < kMax; ++k) want += double(h[k]) * x[i - k];
+            peak = std::max(peak, std::abs(want));
+            worst = std::max(worst, std::abs(want - got[i]));
+        }
+        INFO("duration " << duration << " worst " << worst << " peak " << peak);
+        REQUIRE(peak > 1e-6);
+        REQUIRE(worst < peak * 1e-3);
+    }
 }
