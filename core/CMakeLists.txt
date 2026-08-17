@@ -5,6 +5,7 @@ add_library(sl_core STATIC
   src/webaudio/WaOscillator.cpp
   src/webaudio/WaBiquad.cpp
   src/webaudio/WaNodes.cpp
+  src/webaudio/WaCompressor.cpp
 )
 
 target_include_directories(sl_core
