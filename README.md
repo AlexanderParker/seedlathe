@@ -110,8 +110,9 @@ round-trip a 32-bit integer.
 If you hear nothing, open the app's **Preferences** dialog and pick the right
 audio output device and sample rate.
 
-Note that the standalone does not persist plugin state between runs — only a host
-does. Use the preset bank to keep patches.
+The standalone keeps its own state — seed, designer edits, parts, settings — in
+`%LOCALAPPDATA%/Seedlathe/standalone.state`, written a couple of seconds after
+anything changes and read back on launch. Delete that file to start from defaults.
 
 ### 3. In a DAW
 

@@ -58,6 +58,7 @@ class Seedlathe final : public Plugin
 {
 public:
   Seedlathe(const InstanceInfo& info);
+  ~Seedlathe();
 
 #if IPLUG_DSP
   void ProcessBlock(sample** inputs, sample** outputs, int nFrames) override;
@@ -109,6 +110,19 @@ private:
   // same quiescence handshake Reconfigure uses.
   void EnsurePart(int index);
   void SelectPart(int index);
+
+#ifdef APP_API
+  // The standalone has no host to hold its state, so it holds its own: the
+  // same chunk a DAW would store, written on exit and read on launch.
+  void SaveStandaloneState();
+  void LoadStandaloneState();
+  static WDL_String StandaloneStatePath();
+
+  // Serialised state as last written, so the periodic save can tell whether
+  // anything actually changed.
+  IByteChunk mSavedState;
+  int mIdleTicksSinceSave = 0;
+#endif
 
   // Re-reads every designer control from mEdit. Called after anything replaces
   // the instrument wholesale -- seed change, preset load, oscillator switch.

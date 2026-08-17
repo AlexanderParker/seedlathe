@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <fstream>
 #include <cstring>
 #include <pmmintrin.h>
 #include <vector>
@@ -81,6 +82,13 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
                                       "Off", "2x", "4x");
   GetParam(sl::kMultitimbral)->InitBool("Multitimbral", false);
 
+  // Part 1 always exists, so it is requested from the start. Without this
+  // SerializeState skipped it -- it only writes parts that something asked
+  // for -- and every designer edit on it was silently dropped from the state
+  // chunk. The seed survived anyway because it is a parameter, which is what
+  // made the loss look like nothing was wrong.
+  mParts[0].requested = true;
+
   // Presets live beside the host's own plugin data rather than next to the
   // binary: a VST3 folder is often read-only, and on Windows it is under
   // Program Files, where a write would be silently redirected per user anyway.
@@ -92,6 +100,12 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
     dir.Append("/Seedlathe/Presets");
     mUserPresets.open(dir.Get());
   }
+
+#ifdef APP_API
+  // Before the editor is built, so the layout function sees the restored seed
+  // and part selection rather than the defaults.
+  LoadStandaloneState();
+#endif
 
 #if IPLUG_EDITOR
   mMakeGraphicsFunc = [&]() {
@@ -279,6 +293,66 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
   };
 #endif
 }
+
+Seedlathe::~Seedlathe()
+{
+#ifdef APP_API
+  SaveStandaloneState();
+#endif
+}
+
+#ifdef APP_API
+
+WDL_String Seedlathe::StandaloneStatePath()
+{
+  WDL_String path;
+  AppSupportPath(path);
+  path.Append("/Seedlathe/standalone.state");
+  return path;
+}
+
+void Seedlathe::SaveStandaloneState()
+{
+  IByteChunk chunk;
+  if (!SerializeState(chunk))
+    return;
+
+  // Only when something moved. Comparing the serialised bytes rather than
+  // tracking a dirty flag at every mutation site means no edit can be missed
+  // by forgetting to mark one.
+  if (chunk.Size() == mSavedState.Size() && chunk.Size() > 0 &&
+      std::memcmp(chunk.GetData(), mSavedState.GetData(),
+                  static_cast<size_t>(chunk.Size())) == 0)
+    return;
+
+  // Best effort: a failure to write must not be what stops the app exiting.
+  const WDL_String path = StandaloneStatePath();
+  std::ofstream f(path.Get(), std::ios::binary | std::ios::trunc);
+  if (!f) return;
+  f.write(reinterpret_cast<const char*>(chunk.GetData()), chunk.Size());
+  if (!f) return;
+
+  mSavedState = chunk;
+}
+
+void Seedlathe::LoadStandaloneState()
+{
+  const WDL_String path = StandaloneStatePath();
+  std::ifstream f(path.Get(), std::ios::binary);
+  if (!f) return;
+
+  const std::vector<char> bytes((std::istreambuf_iterator<char>(f)),
+                                std::istreambuf_iterator<char>());
+  if (bytes.empty()) return;
+
+  IByteChunk chunk;
+  chunk.PutBytes(bytes.data(), static_cast<int>(bytes.size()));
+  // UnserializeState checks its own version marker, so a file from a build
+  // whose chunk layout differed is ignored rather than half-applied.
+  UnserializeState(chunk, 0);
+}
+
+#endif // APP_API
 
 #if IPLUG_DSP
 
@@ -1266,6 +1340,17 @@ void Seedlathe::OnParamChange(int paramIdx)
 void Seedlathe::OnIdle()
 {
   mScopeSender.TransmitData(*this);
+
+#ifdef APP_API
+  // Every couple of seconds rather than only on exit. The destructor is not
+  // reached if the app is force-killed or crashes, and losing a session's work
+  // to that is exactly the failure this exists to prevent. OnIdle runs at
+  // PLUG_FPS, so this is roughly a two-second debounce.
+  if (++mIdleTicksSinceSave >= PLUG_FPS * 2) {
+    mIdleTicksSinceSave = 0;
+    SaveStandaloneState();
+  }
+#endif
 
   // A rebuild refused because every rack was still sounding. Retry now that
   // some of them have had time to fall silent.
