@@ -6,3 +6,7 @@ node_modules/
 *.user
 *.suo
 CMakeUserPresets.json
+
+# Full 315-seed reference sweep: regenerate locally with
+#   npm --prefix tools run audio -- --full
+vectors/audio-full/

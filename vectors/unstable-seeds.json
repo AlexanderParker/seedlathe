@@ -1,0 +1,9 @@
+{
+  "note": "Seeds Chrome does not render reproducibly, so they cannot serve as fidelity references. A last-bit float difference appears near the compressor's 288-frame pre-delay boundary and these instruments amplify it chaotically through the compressor's adaptive release. Confirmed across separate browser processes. The exporter's runtime three-render check catches these only intermittently, so they are pinned here as well.",
+  "measuredWith": "tools/diag-stability-sweep.mjs",
+  "thresholdDb": -60,
+  "seeds": [
+    { "seed": 999169202, "divergenceDb": -9.5 },
+    { "seed": 274188674, "divergenceDb": -1.8 }
+  ]
+}
