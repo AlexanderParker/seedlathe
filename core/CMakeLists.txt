@@ -7,6 +7,7 @@ add_library(sl_core STATIC
   src/webaudio/WaNodes.cpp
   src/webaudio/WaCompressor.cpp
   src/SharedFxRack.cpp
+  src/Voice.cpp
 )
 
 target_include_directories(sl_core

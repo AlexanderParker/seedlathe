@@ -94,6 +94,33 @@ void WaConvolver::buildImpulse(double duration, double decay, uint32_t rngSeed) 
         ir[i] = (r(2.0) - 1.0) * env;
     }
 
+    // ConvolverNode normalises its impulse response unless `normalize` is set
+    // false, and zyn never touches it. Skipping this makes every reverb about
+    // sqrt(length) too loud -- roughly 400x for a 3 s tail, which swamps the
+    // whole master bus. Blink's Reverb::CalculateNormalizationScale:
+    //
+    //   power = sqrt(sum(x^2) / (channels * length))   [>= kMinPower]
+    //   scale = (1 / power) * 10^(kGainCalibration/20) * (44100 / sampleRate)
+    //
+    // zyn writes identical left and right channels, so the two-channel power
+    // reduces to one channel's RMS.
+    {
+        constexpr double kGainCalibration = -58.0;
+        constexpr double kGainCalibrationSampleRate = 44100.0;
+        constexpr double kMinPower = 0.000125;
+
+        double sumSq = 0.0;
+        for (double v : ir) sumSq += v * v;
+        double power = std::sqrt(sumSq / double(length));
+        if (!std::isfinite(power) || power < kMinPower) power = kMinPower;
+
+        double scale = 1.0 / power;
+        scale *= std::pow(10.0, kGainCalibration * 0.05);
+        if (sampleRate_ > 0.0) scale *= kGainCalibrationSampleRate / sampleRate_;
+
+        for (double& v : ir) v *= scale;
+    }
+
     blockSize_ = 256;
     const size_t fftSize = blockSize_ * 2;
     partitions_ = (length + blockSize_ - 1) / blockSize_;

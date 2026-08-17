@@ -10,6 +10,7 @@ add_executable(sl_tests
   test_wanodes.cpp
   test_wacompressor.cpp
   test_sharedfxrack.cpp
+  test_voice.cpp
 )
 
 target_link_libraries(sl_tests PRIVATE sl_core Catch2::Catch2WithMain)
