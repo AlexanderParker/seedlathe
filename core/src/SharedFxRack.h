@@ -42,7 +42,12 @@ public:
         int verbSlot = -1;    // -1: no reverb node, signal goes to master
     };
 
-    void prepare(double sampleRate);
+    // nodeCount is how many delay and reverb slots the rack pre-allocates. It
+    // is a parameter rather than a constant because multitimbral mode runs
+    // sixteen of these: a delay line is 384 kB at 48 kHz, so eight slots per
+    // rack across sixteen parts is over a hundred megabytes of buffer for
+    // instruments that can name at most five distinct delays each.
+    void prepare(double sampleRate, size_t nodeCount = kDelayNodes);
 
     // zyn calls cleanupFxNodes at the top of every render().
     void beginRender();
@@ -95,6 +100,10 @@ public:
     // of buffer on its own.
     static constexpr size_t kDelayNodes = 8;
     static constexpr size_t kVerbNodes = 8;
+
+    // The floor an instrument can actually need: five oscillators, so five
+    // distinct delays and five distinct reverbs.
+    static constexpr size_t kMinNodes = 5;
 
     // True while any node still holds state worth mixing.
     bool inUse() const { return anyLive_.load(std::memory_order_relaxed); }

@@ -3,6 +3,7 @@
 #include "sl/Instrument.h"
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace {
 sl::Osc oscWithDelay(double time, double feedback) {
@@ -178,4 +179,43 @@ TEST_CASE("eviction does not fire at or below the limit") {
         rack.acquireRoute(oscWithDelay(0.001 * double(i), 0.1));
     rack.beginRender();
     REQUIRE(rack.nodeCount() == 50);
+}
+
+TEST_CASE("a rack sized to the minimum still routes five distinct effects") {
+    // Multitimbral parts prepare their racks with kMinNodes rather than the
+    // single-mode eight, because sixteen parts at eight delay lines each is
+    // over a hundred megabytes of buffer. Five is the floor an instrument can
+    // actually reach: five oscillators, so five distinct delays and reverbs.
+    sl::SharedFxRack rack;
+    rack.prepare(48000.0, sl::SharedFxRack::kMinNodes);
+
+    sl::Instrument inst;
+    inst.oscCount = sl::kMaxOscs;
+    for (int i = 0; i < sl::kMaxOscs; ++i) {
+        sl::Osc& o = inst.oscs[static_cast<size_t>(i)];
+        o.del.on = true;
+        o.del.time = 0.05 + 0.03 * i;      // distinct, so each needs its own node
+        o.del.feedback = 0.3;
+        o.verb.on = true;
+        o.verb.duration = 0.4 + 0.1 * i;
+        o.verb.decay = 0.7;
+    }
+    rack.prewarm(inst);
+
+    // Every oscillator must come back with a route of its own, not share one.
+    std::vector<int> delaySlots, verbSlots;
+    for (int i = 0; i < sl::kMaxOscs; ++i) {
+        const auto route = rack.acquireRoute(inst.oscs[static_cast<size_t>(i)]);
+        REQUIRE(route.delaySlot >= 0);
+        REQUIRE(route.verbSlot >= 0);
+        delaySlots.push_back(route.delaySlot);
+        verbSlots.push_back(route.verbSlot);
+    }
+    std::sort(delaySlots.begin(), delaySlots.end());
+    std::sort(verbSlots.begin(), verbSlots.end());
+    REQUIRE(std::unique(delaySlots.begin(), delaySlots.end()) == delaySlots.end());
+    REQUIRE(std::unique(verbSlots.begin(), verbSlots.end()) == verbSlots.end());
+
+    // And it must still be silent until something is pushed through it.
+    REQUIRE_FALSE(rack.ringing());
 }

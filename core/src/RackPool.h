@@ -30,7 +30,8 @@ namespace sl {
 // attempt. Callers simply try again on the next parameter change.
 class RackPool {
 public:
-    void prepare(double sampleRate, int numRacks);
+    void prepare(double sampleRate, int numRacks,
+                 size_t nodesPerRack = SharedFxRack::kDelayNodes);
 
     // Audio thread.
     SharedFxRack* liveRack() { return racks_[static_cast<size_t>(live_.load(std::memory_order_acquire))].get(); }

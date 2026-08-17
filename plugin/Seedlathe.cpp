@@ -26,6 +26,7 @@ using seedlathe::PanelControl;
 using seedlathe::SegmentControl;
 using seedlathe::SwitchControl;
 using seedlathe::SeedBoxControl;
+using seedlathe::PartStripControl;
 using seedlathe::TabBarControl;
 using seedlathe::TypeName;
 
@@ -78,6 +79,7 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
   // and compressor timing. It is a quality option, not the reference.
   GetParam(sl::kOversample)->InitEnum("Oversampling", 0, 3, "", IParam::kFlagsNone, "",
                                       "Off", "2x", "4x");
+  GetParam(sl::kMultitimbral)->InitBool("Multitimbral", false);
 
   // Presets live beside the host's own plugin data rather than next to the
   // binary: a VST3 folder is often read-only, and on Windows it is under
@@ -130,11 +132,20 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
         btns.GetGridCell(1, 1, 3).GetPadded(-3.f),
         [this](IControl*) {
           if (mSearch.running()) mSearch.cancel();
-          else mSearch.start(mInstruments[mLive.load(std::memory_order_acquire)], 0.0);
+          else mSearch.start(P().livePatch(), 0.0);
         }, "Find Similar", style));
     g->AttachControl(new IVButtonControl(
         btns.GetGridCell(2, 1, 3).GetPadded(-3.f),
-        [this](IControl*) { mPool.allNotesOff(); }, "Panic", style));
+        [this](IControl*) { P().pool.allNotesOff(); }, "Panic", style));
+
+    {
+      const IRECT strip = top.GetReducedFromLeft(528.f).GetFromLeft(360.f);
+      auto* parts = new PartStripControl(
+          strip, sl::kNumParts,
+          [this](int i) { return mParts[static_cast<size_t>(i)].allocated; },
+          [this](int i) { SelectPart(i); });
+      g->AttachControl(parts, kCtrlTagPartStrip);
+    }
 
     const IRECT knobs = top.GetFromRight(280.f);
     g->AttachControl(new IVKnobControl(knobs.GetGridCell(0, 1, 3).GetPadded(-4.f),
@@ -173,10 +184,15 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
           engineRow.GetReducedFromLeft(236.f).GetFromLeft(160.f).GetVPadded(-8.f),
           sl::kVoices, "Voices", style, false, EDirection::Horizontal),
           kNoTag, "instrument");
+      g->AttachControl(new IVToggleControl(
+          engineRow.GetReducedFromLeft(406.f).GetFromLeft(130.f).GetVPadded(-8.f),
+          sl::kMultitimbral, "Multitimbral", style, "Off", "On"),
+          kNoTag, "instrument");
       g->AttachControl(new ITextControl(
-          engineRow.GetReducedFromLeft(400.f),
-          "Oversampling changes the sound: zyn runs its graph at the host rate, "
-          "so 2x and 4x shift band limiting and filter timing.",
+          engineRow.GetReducedFromLeft(548.f),
+          "Oversampling changes the sound: zyn runs at the host rate, so 2x and 4x "
+          "shift band limiting and filter timing. Multitimbral gives each MIDI "
+          "channel its own part.",
           IText(11.f, IColor(255, 110, 118, 130), nullptr, EAlign::Near)),
           kNoTag, "instrument");
     }
@@ -222,11 +238,11 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
       const IRECT row = page.GetReducedFromTop(50.f).GetFromTop(36.f).GetFromLeft(560.f);
       g->AttachControl(new IVButtonControl(row.GetGridCell(0, 1, 3).GetPadded(-4.f),
           [this](IControl*) {
-            mSearch.start(mInstruments[mLive.load(std::memory_order_acquire)], 0.0);
+            mSearch.start(P().livePatch(), 0.0);
           }, "Search", style), kNoTag, "search");
       g->AttachControl(new IVButtonControl(row.GetGridCell(1, 1, 3).GetPadded(-4.f),
           [this](IControl*) {
-            mSearch.start(mInstruments[mLive.load(std::memory_order_acquire)],
+            mSearch.start(P().livePatch(),
                           mSearchThreshold);
           }, "Search until 90%", style), kNoTag, "search");
       g->AttachControl(new IVButtonControl(row.GetGridCell(2, 1, 3).GetPadded(-4.f),
@@ -268,7 +284,7 @@ int overFactor(int index) { return index == 2 ? 4 : (index == 1 ? 2 : 1); }
 
 sl::Osc& Seedlathe::EditOsc()
 {
-  return mEdit.oscs[static_cast<size_t>(std::clamp(mDesignOsc, 0, sl::kMaxOscs - 1))];
+  return P().edit.oscs[static_cast<size_t>(std::clamp(P().designOsc, 0, sl::kMaxOscs - 1))];
 }
 
 void Seedlathe::BuildDesigner(IGraphics* g, const IRECT& page, const IVStyle& style)
@@ -307,18 +323,18 @@ void Seedlathe::BuildDesigner(IGraphics* g, const IRECT& page, const IVStyle& st
 
   auto* oscSel = new OscSelectControl(
       selRow.GetFromLeft(400.f),
-      [this]() { return mEdit.oscCount; },
-      [this](int i) { mDesignOsc = i; SyncDesigner(); });
+      [this]() { return P().edit.oscCount; },
+      [this](int i) { P().designOsc = i; SyncDesigner(); });
   g->AttachControl(oscSel, kCtrlTagOscSelect, "design");
   mDesignerControls.push_back(oscSel);
 
   const IRECT countRow = selRow.GetReducedFromLeft(412.f).GetFromLeft(200.f);
   g->AttachControl(new IVButtonControl(countRow.GetFromLeft(30.f),
-      [this](IControl*) { SetOscCount(mEdit.oscCount - 1); }, "-", style), kNoTag, "design");
+      [this](IControl*) { SetOscCount(P().edit.oscCount - 1); }, "-", style), kNoTag, "design");
   g->AttachControl(new ITextControl(countRow.GetReducedFromLeft(34.f).GetFromLeft(130.f), "",
       IText(11.f, IColor(255, 214, 221, 230))), kCtrlTagOscCount, "design");
   g->AttachControl(new IVButtonControl(countRow.GetFromRight(30.f),
-      [this](IControl*) { SetOscCount(mEdit.oscCount + 1); }, "+", style), kNoTag, "design");
+      [this](IControl*) { SetOscCount(P().edit.oscCount + 1); }, "+", style), kNoTag, "design");
 
   // Four columns. The instrument carries far more surface than a knob-per-field
   // layout could hold at this window size, so it is grouped by what a sound
@@ -466,16 +482,16 @@ void Seedlathe::BuildDesigner(IGraphics* g, const IRECT& page, const IVStyle& st
     const IRECT p(c.L, c.T, c.R, c.T + 294.f);
     panel(p, "FM MATRIX");
     sw(rowIn(p, 16.f, 20.f), "MATRIX ON",
-       [this]() { return mEdit.hasFmMatrix; }, [this](bool b) { mEdit.hasFmMatrix = b; });
+       [this]() { return P().edit.hasFmMatrix; }, [this](bool b) { P().edit.hasFmMatrix = b; });
     track(new FmMatrixControl(
         rowIn(p, 40.f, 246.f),
         [this](int src, int tgt) {
-          return mEdit.fmMatrix[static_cast<size_t>(src)][static_cast<size_t>(tgt)];
+          return P().edit.fmMatrix[static_cast<size_t>(src)][static_cast<size_t>(tgt)];
         },
         [this](int src, int tgt, double v) {
-          mEdit.fmMatrix[static_cast<size_t>(src)][static_cast<size_t>(tgt)] = v;
+          P().edit.fmMatrix[static_cast<size_t>(src)][static_cast<size_t>(tgt)] = v;
         },
-        [this]() { return mEdit.oscCount; },
+        [this]() { return P().edit.oscCount; },
         push));
 
     const IRECT q(c.L, c.T + 300.f, c.R, c.T + 392.f);
@@ -483,7 +499,7 @@ void Seedlathe::BuildDesigner(IGraphics* g, const IRECT& page, const IVStyle& st
     g->AttachControl(new IVButtonControl(rowIn(q, 18.f, 22.f),
         [this](IControl*) {
           if (auto* ui = GetUI())
-            ui->SetTextInClipboard(sl::instrumentToJson(mEdit).dump(2).c_str());
+            ui->SetTextInClipboard(sl::instrumentToJson(P().edit).dump(2).c_str());
         }, "Copy JSON", style), kNoTag, "design");
     g->AttachControl(new IVButtonControl(rowIn(q, 44.f, 22.f),
         [this](IControl*) {
@@ -499,8 +515,8 @@ void Seedlathe::BuildDesigner(IGraphics* g, const IRECT& page, const IVStyle& st
           } catch (const std::exception&) {
             return;
           }
-          mEdit = parsed;
-          mDesignOsc = 0;
+          P().edit = parsed;
+          P().designOsc = 0;
           PushEdit();
           SyncDesigner();
         }, "Paste JSON", style), kNoTag, "design");
@@ -514,26 +530,26 @@ void Seedlathe::BuildDesigner(IGraphics* g, const IRECT& page, const IVStyle& st
 void Seedlathe::SetOscCount(int n)
 {
   n = std::clamp(n, 1, sl::kMaxOscs);
-  if (n == mEdit.oscCount) return;
+  if (n == P().edit.oscCount) return;
 
   // A new slot is a copy of the last one, not a default Osc. A default Osc has
   // an all-zero gain envelope, so adding an oscillator would appear to do
   // nothing at all until the user rebuilt its envelope by hand.
-  for (int i = mEdit.oscCount; i < n; ++i)
-    mEdit.oscs[static_cast<size_t>(i)] =
-        mEdit.oscs[static_cast<size_t>(std::max(0, mEdit.oscCount - 1))];
+  for (int i = P().edit.oscCount; i < n; ++i)
+    P().edit.oscs[static_cast<size_t>(i)] =
+        P().edit.oscs[static_cast<size_t>(std::max(0, P().edit.oscCount - 1))];
 
-  mEdit.oscCount = n;
-  if (mDesignOsc >= n) mDesignOsc = n - 1;
+  P().edit.oscCount = n;
+  if (P().designOsc >= n) P().designOsc = n - 1;
   PushEdit();
   SyncDesigner();
 }
 
 void Seedlathe::PushEdit()
 {
-  mEdited = true;
-  mPendingPublish = true;
-  ServicePending();
+  P().edited = true;
+  P().pendingPublish = true;
+  ServicePending(P());
   RefreshSeedDisplay();
 }
 
@@ -557,33 +573,42 @@ bool sameFxConfig(const sl::Instrument& a, const sl::Instrument& b)
 }
 } // namespace
 
-void Seedlathe::ServicePending()
+void Seedlathe::ServicePending(seedlathe::Part& part)
 {
-  if (!mPendingPublish || !mPrepared)
+  if (!part.pendingPublish || !mPrepared || !part.allocated)
     return;
 
-  const int live = mLive.load(std::memory_order_relaxed);
+  const int live = part.live.load(std::memory_order_relaxed);
 
   // Dragging an envelope handle emits an edit per mouse move. Rebuilding a rack
   // for each one would regenerate every reverb impulse -- an FFT per drag frame
   // -- and would be refused whenever the racks were busy, so the edit would not
   // be heard until the note ended. Only delay and reverb changes need the rack.
-  if (mRacksBuilt && sameFxConfig(mEdit, mInstruments[static_cast<size_t>(live)])) {
-    mInstruments[static_cast<size_t>(1 - live)] = mEdit;
-    mLive.store(1 - live, std::memory_order_release);
-    mPendingPublish = false;
+  if (part.racksBuilt &&
+      sameFxConfig(part.edit, part.instruments[static_cast<size_t>(live)])) {
+    part.instruments[static_cast<size_t>(1 - live)] = part.edit;
+    part.live.store(1 - live, std::memory_order_release);
+    part.pendingPublish = false;
     return;
   }
 
   // Impulse generation and its FFTs happen here, on the message thread, and
   // RackPool guarantees the rack it builds into is unreachable from audio.
-  if (!mRacks.rebuild(mEdit, mPool))
+  if (!part.racks.rebuild(part.edit, part.pool))
     return;
 
-  mInstruments[static_cast<size_t>(1 - live)] = mEdit;
-  mLive.store(1 - live, std::memory_order_release);
-  mRacksBuilt = true;
-  mPendingPublish = false;
+  part.instruments[static_cast<size_t>(1 - live)] = part.edit;
+  part.live.store(1 - live, std::memory_order_release);
+  part.racksBuilt = true;
+  part.pendingPublish = false;
+}
+
+void Seedlathe::ServiceAllPending()
+{
+  // Every allocated part, not just the edited one: a refused rebuild on a part
+  // the user has since navigated away from would otherwise never be retried.
+  for (auto& part : mParts)
+    ServicePending(part);
 }
 
 void Seedlathe::SyncDesigner()
@@ -658,11 +683,11 @@ void Seedlathe::LoadPreset(int payload)
     mSelectedUserPreset = p.name;
 
     SetSeed(p.seed);
-    // The seed load has already regenerated mEdit, so the stored instrument
+    // The seed load has already regenerated P().edit, so the stored instrument
     // goes on top of it -- and only when the preset actually holds one.
     if (p.edited) {
-      mEdit = p.instrument;
-      mDesignOsc = 0;
+      P().edit = p.instrument;
+      P().designOsc = 0;
       PushEdit();
       SyncDesigner();
     }
@@ -698,17 +723,17 @@ void Seedlathe::PromptSavePreset()
   if (!mSelectedUserPreset.empty())
     std::snprintf(suggested, sizeof(suggested), "%s", mSelectedUserPreset.c_str());
   else
-    std::snprintf(suggested, sizeof(suggested), "%s %u", TypeName(mEdit.typeIndex),
-                  mCurrentSeed);
+    std::snprintf(suggested, sizeof(suggested), "%s %u", TypeName(P().edit.typeIndex),
+                  P().seed);
 
   mPrompt->Prompt(GetUI()->GetBounds().GetCentredInside(320.f, 30.f), suggested,
                   [this](const char* text) {
                     sl::UserPreset p;
                     p.name = sl::sanitisePresetName(text);
-                    p.seed = mCurrentSeed;
+                    p.seed = P().seed;
                     p.octave = GetParam(sl::kOctave)->Int();
-                    p.edited = mEdited;
-                    p.instrument = mEdit;
+                    p.edited = P().edited;
+                    p.instrument = P().edit;
 
                     char buf[192];
                     if (mUserPresets.save(p)) {
@@ -846,7 +871,7 @@ void Seedlathe::ExportWav()
 
   WDL_String file, dir;
   char suggested[64];
-  std::snprintf(suggested, sizeof(suggested), "seedlathe-%u.wav", mCurrentSeed);
+  std::snprintf(suggested, sizeof(suggested), "seedlathe-%u.wav", P().seed);
   file.Set(suggested);
   ui->PromptForFile(file, dir, EFileAction::Save, "wav");
   if (!file.GetLength()) return;
@@ -854,7 +879,7 @@ void Seedlathe::ExportWav()
   // Rendered offline rather than captured from the audio thread, so the file
   // is the same every time and does not depend on what the host was doing.
   // Four seconds covers the longest generated reverb tail with room to spare.
-  const sl::RenderResult r = sl::renderOffline(mEdit, GetParam(sl::kOctave)->Int() * 12,
+  const sl::RenderResult r = sl::renderOffline(P().edit, GetParam(sl::kOctave)->Int() * 12,
                                                1.0, 4.0, GetSampleRate());
   const bool ok = sl::writeWav(file.Get(), r, GetSampleRate());
 
@@ -894,11 +919,20 @@ void Seedlathe::RefreshSampleInfo()
 
 void Seedlathe::SetSeed(uint32_t seed)
 {
-  GetParam(sl::kSeedHi)->Set(sl::seedHi(seed));
-  GetParam(sl::kSeedLo)->Set(sl::seedLo(seed));
-  SendParameterValueFromDelegate(sl::kSeedHi, GetParam(sl::kSeedHi)->GetNormalized(), true);
-  SendParameterValueFromDelegate(sl::kSeedLo, GetParam(sl::kSeedLo)->GetNormalized(), true);
-  RebuildInstrument();
+  seedlathe::Part& part = P();
+  if (mEditPart == 0) {
+    // Only part 1's seed is a host parameter; see SeedlatheParams.h.
+    GetParam(sl::kSeedHi)->Set(sl::seedHi(seed));
+    GetParam(sl::kSeedLo)->Set(sl::seedLo(seed));
+    SendParameterValueFromDelegate(sl::kSeedHi, GetParam(sl::kSeedHi)->GetNormalized(), true);
+    SendParameterValueFromDelegate(sl::kSeedLo, GetParam(sl::kSeedLo)->GetNormalized(), true);
+    RebuildInstrument();
+  } else {
+    part.seed = seed;
+    // The seed did not come from a parameter, so nothing else will notice it
+    // moved. Force the regeneration rather than let the equality check skip it.
+    RebuildInstrument(true);
+  }
   RefreshSeedDisplay();
 }
 
@@ -926,27 +960,38 @@ void Seedlathe::RefreshSeedDisplay()
   auto* ui = GetUI();
   if (!ui) return;
 
-  const uint32_t seed = sl::seedFrom(GetParam(sl::kSeedHi)->Int(),
-                                     GetParam(sl::kSeedLo)->Int());
+  const uint32_t seed = (mEditPart == 0)
+                            ? sl::seedFrom(GetParam(sl::kSeedHi)->Int(),
+                                           GetParam(sl::kSeedLo)->Int())
+                            : P().seed;
   if (auto* c = ui->GetControlWithTag(kCtrlTagSeedBox))
     c->As<SeedBoxControl>()->SetSeed(seed);
+
+  if (auto* c = ui->GetControlWithTag(kCtrlTagPartStrip)) {
+    auto* strip = c->As<PartStripControl>();
+    strip->SetEnabled(mMulti);
+    strip->SetSelected(mEditPart);
+  }
 
   // The label describes the edit buffer, not what is currently sounding: the
   // two differ for as long as ServicePending is waiting for a free rack, and
   // the controls the user is looking at show the edit buffer.
   if (auto* c = ui->GetControlWithTag(kCtrlTagTypeLabel)) {
-    char buf[128];
-    std::snprintf(buf, sizeof(buf), "%s  -  %d oscillator%s%s%s",
-                  TypeName(mEdit.typeIndex), mEdit.oscCount,
-                  mEdit.oscCount == 1 ? "" : "s",
-                  mEdit.hasFmMatrix ? "  -  FM matrix" : "",
-                  mEdited ? "  -  edited" : "");
+    char buf[160];
+    char part[24] = "";
+    if (mMulti) std::snprintf(part, sizeof(part), "Part %d  -  ", mEditPart + 1);
+    std::snprintf(buf, sizeof(buf), "%s%s  -  %d oscillator%s%s%s",
+                  part,
+                  TypeName(P().edit.typeIndex), P().edit.oscCount,
+                  P().edit.oscCount == 1 ? "" : "s",
+                  P().edit.hasFmMatrix ? "  -  FM matrix" : "",
+                  P().edited ? "  -  edited" : "");
     c->As<ITextControl>()->SetStr(buf);
   }
 
   if (auto* c = ui->GetControlWithTag(kCtrlTagOscCount)) {
     char buf[48];
-    std::snprintf(buf, sizeof(buf), "%d of %d", mDesignOsc + 1, mEdit.oscCount);
+    std::snprintf(buf, sizeof(buf), "%d of %d", P().designOsc + 1, P().edit.oscCount);
     c->As<ITextControl>()->SetStr(buf);
   }
 #endif
@@ -960,40 +1005,97 @@ void Seedlathe::RebuildInstrument(bool force)
   if (!mPrepared)
     return;
 
-  const auto seed = sl::seedFrom(GetParam(sl::kSeedHi)->Int(),
-                                 GetParam(sl::kSeedLo)->Int());
-  // `force` is Revert to seed: the seed has not moved, but the edit buffer has
-  // to be thrown away and regenerated from it.
-  if (mHasSeed && seed == mCurrentSeed && !force)
+  seedlathe::Part& part = P();
+  if (!part.allocated)
     return;
 
-  mEdit = sl::generateInstrument(seed);
-  mEdited = false;
-  mCurrentSeed = seed;
-  mHasSeed = true;
-  mDesignOsc = 0;
-  mPendingPublish = true;
-  ServicePending();
+  const uint32_t seed =
+      (mEditPart == 0) ? sl::seedFrom(GetParam(sl::kSeedHi)->Int(),
+                                      GetParam(sl::kSeedLo)->Int())
+                       : part.seed;
+
+  // `force` is Revert to seed, and is also how a part whose seed is not a
+  // parameter gets rebuilt at all: for those the equality check is always true.
+  if (part.hasSeed && seed == part.seed && !force)
+    return;
+
+  part.edit = sl::generateInstrument(seed);
+  part.edited = false;
+  part.seed = seed;
+  part.hasSeed = true;
+  part.designOsc = 0;
+  part.pendingPublish = true;
+  ServicePending(part);
   SyncDesigner();
+}
+
+void Seedlathe::EnsurePart(int index)
+{
+  if (index < 0 || index >= sl::kNumParts) return;
+  seedlathe::Part& part = mParts[static_cast<size_t>(index)];
+  part.requested = true;
+  if (part.allocated || !mPrepared) return;
+
+  // Allocating a part is the same class of operation as changing the
+  // oversampling factor: it hands the audio thread new buffers to walk. Same
+  // handshake, for the same reason.
+  Quiesce([this, &part] {
+    part.prepare(GetSampleRate() * mOsFactor, mMulti, GetParam(sl::kVoices)->Int());
+  });
+
+  if (!part.hasSeed) {
+    // A fresh part starts on the same seed as part 1 rather than on silence,
+    // so selecting it produces a sound to work from.
+    part.seed = mParts[0].seed;
+    part.edit = sl::generateInstrument(part.seed);
+    part.hasSeed = true;
+  }
+  part.pendingPublish = true;
+  ServicePending(part);
+}
+
+void Seedlathe::SelectPart(int index)
+{
+  if (index < 0 || index >= sl::kNumParts || index == mEditPart) return;
+  EnsurePart(index);
+  mEditPart = index;
+  SyncDesigner();
+  RefreshSeedDisplay();
 }
 
 void Seedlathe::OnReset()
 {
   mOsFactor = 1 << GetParam(sl::kOversample)->Int();
+  mMulti = GetParam(sl::kMultitimbral)->Bool();
   PrepareEngine();
   mPrepared = true;
+
+  // A restored session may name parts the engine had no sample rate for when
+  // the chunk arrived. Now it has one.
+  for (int i = 1; i < sl::kNumParts; ++i)
+    if (mParts[static_cast<size_t>(i)].requested)
+      EnsurePart(i);
 
   // A restored patch must survive this. OnReset also runs after
   // UnserializeState, and regenerating from the seed there would silently
   // discard every designer edit the host just handed back.
-  if (mEdited) {
-    mPendingPublish = true;
-    ServicePending();
-    SyncDesigner();
-  } else {
-    mHasSeed = false;
-    RebuildInstrument();
+  for (int i = 0; i < sl::kNumParts; ++i) {
+    seedlathe::Part& part = mParts[static_cast<size_t>(i)];
+    if (!part.allocated) continue;
+    if (part.edited || i != 0) {
+      part.pendingPublish = true;
+      ServicePending(part);
+    }
   }
+
+  if (!mParts[0].edited) {
+    mParts[0].hasSeed = false;
+    const int was = mEditPart;
+    mEditPart = 0;
+    RebuildInstrument();
+    mEditPart = was;
+  }
+  SyncDesigner();
 }
 
 bool Seedlathe::SerializeState(IByteChunk& chunk) const
@@ -1001,42 +1103,79 @@ bool Seedlathe::SerializeState(IByteChunk& chunk) const
   if (!SerializeParams(chunk))
     return false;
 
-  // Empty for an unedited patch: the seed alone reproduces it, and storing the
-  // generated instrument as well would mean two sources of truth that a future
-  // generator change could put out of step.
-  const std::string json = mEdited ? sl::instrumentToJson(mEdit).dump() : std::string();
-  return chunk.PutStr(json.c_str()) > 0;
+  // Versioned, because the shape of what follows has already changed once and
+  // a mis-read here silently loads the wrong instrument rather than failing.
+  const int version = kStateVersion;
+  chunk.Put(&version);
+  chunk.Put(&mEditPart);
+
+  for (const auto& part : mParts) {
+    const int used = part.requested ? 1 : 0;
+    chunk.Put(&used);
+    if (!used) continue;
+    chunk.Put(&part.seed);
+    // Empty for an unedited patch: the seed alone reproduces it, and storing
+    // the generated instrument as well would mean two sources of truth that a
+    // future generator change could put out of step.
+    const std::string json =
+        part.edited ? sl::instrumentToJson(part.edit).dump() : std::string();
+    chunk.PutStr(json.c_str());
+  }
+  return true;
 }
 
 int Seedlathe::UnserializeState(const IByteChunk& chunk, int startPos)
 {
-  // This regenerates mEdit from the restored seed as a side effect of
+  // This regenerates part 1 from the restored seed as a side effect of
   // OnParamChange, which is exactly the state an unedited patch wants.
   int pos = UnserializeParams(chunk, startPos);
 
-  WDL_String json;
-  const int next = chunk.GetStr(json, pos);
-  if (next < 0)
-    return pos;   // state written before the designer existed
+  int version = 0;
+  int next = chunk.Get(&version, pos);
+  if (next < 0 || version != kStateVersion)
+    return pos;   // state from a build whose chunk layout differed
   pos = next;
 
-  if (json.GetLength() == 0) {
-    mEdited = false;
-    return pos;
+  int editPart = 0;
+  pos = chunk.Get(&editPart, pos);
+  if (pos < 0) return startPos;
+
+  for (int i = 0; i < sl::kNumParts; ++i) {
+    int used = 0;
+    next = chunk.Get(&used, pos);
+    if (next < 0) return pos;
+    pos = next;
+    if (!used) continue;
+
+    seedlathe::Part& part = mParts[static_cast<size_t>(i)];
+    uint32_t seed = 0;
+    pos = chunk.Get(&seed, pos);
+    WDL_String json;
+    next = chunk.GetStr(json, pos);
+    if (next < 0) return pos;
+    pos = next;
+
+    part.requested = true;
+    part.seed = seed;
+    part.hasSeed = true;
+    part.edited = false;
+    part.edit = sl::generateInstrument(seed);
+
+    if (json.GetLength() > 0) {
+      try {
+        part.edit = sl::instrumentFromJson(nlohmann::json::parse(json.Get()));
+        part.edited = true;
+      } catch (const std::exception&) {
+        // Keep the seed's instrument rather than load a broken one.
+      }
+    }
+    part.designOsc = 0;
+    part.pendingPublish = true;
+    EnsurePart(i);            // no-op until OnReset has given a sample rate
+    ServicePending(part);
   }
 
-  sl::Instrument parsed;
-  try {
-    parsed = sl::instrumentFromJson(nlohmann::json::parse(json.Get()));
-  } catch (const std::exception&) {
-    return pos;   // keep the seed's instrument rather than load a broken one
-  }
-
-  mEdit = parsed;
-  mEdited = true;
-  mDesignOsc = 0;
-  mPendingPublish = true;
-  ServicePending();
+  mEditPart = std::clamp(editPart, 0, sl::kNumParts - 1);
   SyncDesigner();
   return pos;
 }
@@ -1046,7 +1185,8 @@ void Seedlathe::OnParamChange(int paramIdx)
   if (paramIdx == sl::kSeedHi || paramIdx == sl::kSeedLo) {
     RebuildInstrument();
     RefreshSeedDisplay();
-  } else if (paramIdx == sl::kOversample) {
+  } else if (paramIdx == sl::kOversample || paramIdx == sl::kMultitimbral ||
+             paramIdx == sl::kVoices) {
     Reconfigure();
   }
 }
@@ -1057,7 +1197,7 @@ void Seedlathe::OnIdle()
 
   // A rebuild refused because every rack was still sounding. Retry now that
   // some of them have had time to fall silent.
-  ServicePending();
+  ServiceAllPending();
 
 #if IPLUG_EDITOR
   auto* ui = GetUI();
@@ -1112,6 +1252,17 @@ void Seedlathe::OnIdle()
 
 void Seedlathe::ProcessMidiMsg(const IMidiMsg& msg)
 {
+  // In single mode every channel drives part 1, which is what a host sending
+  // on channel 1 expects and what omni mode means. In multitimbral mode the
+  // channel selects the part, and a channel whose part has never been
+  // allocated is silent -- allocating one here would mean the audio thread
+  // asking for sixty megabytes of buffer mid-block.
+  const int channel = msg.Channel();
+  const int index = mMulti ? std::clamp(channel, 0, sl::kNumParts - 1) : 0;
+  seedlathe::Part& part = mParts[static_cast<size_t>(index)];
+  if (!part.allocated)
+    return;
+
   const int octave = GetParam(sl::kOctave)->Int();
   const auto status = msg.StatusMsg();
 
@@ -1120,19 +1271,17 @@ void Seedlathe::ProcessMidiMsg(const IMidiMsg& msg)
     // zyn's gain: 0.5 * volume * velocity, with 0.5 applied inside the voice.
     const double gain = (msg.Velocity() / 127.0) * (GetParam(sl::kVolume)->Value() / 100.0);
     const int note = msg.NoteNumber() - kMidiMiddleC + octave * 12;
-    mPool.noteOn(mRacks.liveRack(),
-                 mInstruments[mLive.load(std::memory_order_acquire)],
-                 note, gain, true);
+    part.pool.noteOn(part.racks.liveRack(), part.livePatch(), note, gain, true);
   }
   else if (status == IMidiMsg::kNoteOff ||
            (status == IMidiMsg::kNoteOn && msg.Velocity() == 0))
   {
-    mPool.noteOff(msg.NoteNumber() - kMidiMiddleC + octave * 12);
+    part.pool.noteOff(msg.NoteNumber() - kMidiMiddleC + octave * 12);
   }
   else if (status == IMidiMsg::kControlChange &&
            msg.ControlChangeIdx() == IMidiMsg::kAllNotesOff)
   {
-    mPool.allNotesOff();
+    part.pool.allNotesOff();
   }
 }
 
@@ -1147,9 +1296,9 @@ void Seedlathe::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
   const int nChans = NOutChansConnected();
 
   // Claim the block before reading the reconfigure flag, not after. Half of the
-  // handshake in Reconfigure lives here: an odd counter means a block is in
-  // flight, and the message thread waits for it to go even before it touches
-  // anything the render walks.
+  // handshake in Quiesce lives here: an odd counter means a block is in flight,
+  // and the message thread waits for it to go even before it touches anything
+  // the render walks.
   mBlockSeq.fetch_add(1, std::memory_order_acq_rel);
 
   const bool bail = mReconfiguring.load(std::memory_order_acquire) ||
@@ -1157,8 +1306,8 @@ void Seedlathe::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
 
   if (bail)
   {
-    // Either the engine is being rebuilt at a new rate, or the host handed over
-    // more frames than OnReset sized for. Silence beats allocating here.
+    // Either the engine is being rebuilt, or the host handed over more frames
+    // than PrepareEngine sized for. Silence beats allocating here.
     for (int c = 0; c < nChans; ++c)
       for (int s = 0; s < nFrames; ++s) outputs[c][s] = 0.;
     mBlockSeq.fetch_add(1, std::memory_order_release);
@@ -1170,12 +1319,27 @@ void Seedlathe::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
   // it renders that many frames and the decimator brings them back down.
   const int engineFrames = nFrames * mOsFactor;
 
-  mRacks.audioBlockStarted(mPool);
-  mPool.render(mLeft.data(), mRight.data(), engineFrames,
-               mRacks.all(), mRacks.allCount());
+  for (int s = 0; s < engineFrames; ++s) { mLeft[s] = 0.f; mRight[s] = 0.f; }
 
-  // The compressor runs at the engine rate, before decimation: it is part of
-  // the instrument's sound, and running it after would change its timing.
+  // Parts sum into one bus, which is what a multitimbral instrument on a single
+  // stereo output means. Silent parts are skipped entirely rather than rendered
+  // and added as zero: with sixteen parts allocated that is most of them.
+  for (auto& part : mParts)
+  {
+    if (!part.allocated || !part.sounding()) continue;
+
+    part.racks.audioBlockStarted(part.pool);
+    part.pool.render(mPartL.data(), mPartR.data(), engineFrames,
+                     part.racks.all(), part.racks.allCount());
+    for (int s = 0; s < engineFrames; ++s)
+    {
+      mLeft[s] += mPartL[s];
+      mRight[s] += mPartR[s];
+    }
+  }
+
+  // The compressor runs at the engine rate, before decimation, and across the
+  // summed parts: it is zyn's single master compressor, not a per-part one.
   for (int s = 0; s < engineFrames; ++s)
   {
     double l = 0.0, r = 0.0;
@@ -1209,19 +1373,16 @@ void Seedlathe::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
   _mm_setcsr(mxcsr);
 }
 
-void Seedlathe::Reconfigure()
+void Seedlathe::Quiesce(const std::function<void()>& work)
 {
-  if (!mPrepared)
-    return;
-
-  const int wanted = 1 << GetParam(sl::kOversample)->Int();   // 1, 2 or 4
-  if (wanted == mOsFactor)
-    return;
-
-  // Quiescence handshake. Setting the flag makes every block that starts from
-  // now on bail out without touching the engine; waiting for an even counter
-  // then proves no block that started earlier is still inside one. Only after
-  // both is it safe to free and reallocate what the render walks.
+  // Raising the flag makes every block that starts from now on bail out without
+  // touching the engine; waiting for an even counter then proves no block that
+  // started earlier is still inside one. Only after both is it safe to free and
+  // reallocate what the render walks.
+  //
+  // ProcessBlock claims its block by incrementing the counter BEFORE reading
+  // the flag. Claiming after would leave a window where a block had passed the
+  // check and not yet announced itself.
   //
   // If the host is not calling ProcessBlock at all the counter is already even
   // and this returns at once, which is the same conclusion by a shorter route.
@@ -1233,10 +1394,41 @@ void Seedlathe::Reconfigure()
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 
-  mOsFactor = wanted;
-  PrepareEngine();
+  work();
 
   mReconfiguring.store(false, std::memory_order_release);
+}
+
+void Seedlathe::Reconfigure()
+{
+  if (!mPrepared)
+    return;
+
+  const int wantedOs = 1 << GetParam(sl::kOversample)->Int();
+  const bool wantedMulti = GetParam(sl::kMultitimbral)->Bool();
+  const int wantedVoices = GetParam(sl::kVoices)->Int();
+  if (wantedOs == mOsFactor && wantedMulti == mMulti &&
+      wantedVoices == mPreparedVoices)
+    return;
+
+  mOsFactor = wantedOs;
+  mMulti = wantedMulti;
+  Quiesce([this] { PrepareEngine(); });
+
+  // Every rack was thrown away, so every allocated part needs republishing.
+  for (auto& part : mParts)
+  {
+    if (!part.allocated) continue;
+    part.pendingPublish = true;
+    ServicePending(part);
+  }
+
+  if (!mMulti && mEditPart != 0)
+    SelectPart(0);
+
+  // The part strip is enabled by multitimbral mode, so it has to be told when
+  // that changed; nothing else on screen reads the flag.
+  RefreshSeedDisplay();
 }
 
 void Seedlathe::PrepareEngine()
@@ -1244,10 +1436,16 @@ void Seedlathe::PrepareEngine()
   // Everything downstream of here is sized and tuned for the rate the engine
   // runs at, which is the host rate times the oversampling factor.
   const double rate = GetSampleRate() * mOsFactor;
-
-  mRacks.prepare(rate, kNumRacks);
   mPreparedVoices = GetParam(sl::kVoices)->Int();
-  mPool.prepare(rate, mPreparedVoices);
+
+  // Part 1 always exists. The rest keep whatever allocation state they had:
+  // re-preparing an allocated part is required (its buffers are stale at the
+  // new rate), allocating an untouched one is not.
+  mParts[0].prepare(rate, mMulti, mPreparedVoices);
+  for (int i = 1; i < sl::kNumParts; ++i)
+    if (mParts[static_cast<size_t>(i)].allocated)
+      mParts[static_cast<size_t>(i)].prepare(rate, mMulti, mPreparedVoices);
+
   mComp.prepare(rate);
   mComp.setParams(-12.0, 6.0, 8.0, 0.003, 0.15);   // zyn's Z.init settings
 
@@ -1260,12 +1458,10 @@ void Seedlathe::PrepareEngine()
   const size_t engineCap = hostCap * static_cast<size_t>(mOsFactor);
   mLeft.assign(engineCap, 0.f);
   mRight.assign(engineCap, 0.f);
+  mPartL.assign(engineCap, 0.f);
+  mPartR.assign(engineCap, 0.f);
   mDownL.assign(hostCap, 0.f);
   mDownR.assign(hostCap, 0.f);
-
-  // prepare() reallocated every rack at the new rate, so none of them holds an
-  // impulse for the current patch any more.
-  mRacksBuilt = false;
 
   SetLatency(mDecimL.latencySamples());
 }

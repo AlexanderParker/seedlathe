@@ -86,15 +86,16 @@ uint64_t oscKey(const Osc& o) {
 
 } // namespace
 
-void SharedFxRack::prepare(double sampleRate) {
+void SharedFxRack::prepare(double sampleRate, size_t nodeCount) {
     sampleRate_ = sampleRate;
+    nodeCount = std::max(kMinNodes, nodeCount);
 
     // Pre-allocated pools so acquireRoute() never allocates. The generator's
     // delay time tops out at 0.5 s, which sets the buffer length.
-    delays_.resize(kDelayNodes);
+    delays_.resize(nodeCount);
     for (auto& d : delays_) d.prepare(sampleRate, 0.5);
 
-    verbs_.resize(kVerbNodes);
+    verbs_.resize(nodeCount);
     for (auto& v : verbs_) v.prepare(sampleRate);
 
     delayLive_.assign(delays_.size(), false);

@@ -3,13 +3,13 @@
 
 namespace sl {
 
-void RackPool::prepare(double sampleRate, int numRacks) {
+void RackPool::prepare(double sampleRate, int numRacks, size_t nodesPerRack) {
     const int n = std::max(2, numRacks);
     racks_.clear();
     racks_.reserve(static_cast<size_t>(n));
     for (int i = 0; i < n; ++i) {
         racks_.push_back(std::make_unique<SharedFxRack>());
-        racks_.back()->prepare(sampleRate);
+        racks_.back()->prepare(sampleRate, nodesPerRack);
     }
     flat_.clear();
     for (auto& r : racks_) flat_.push_back(r.get());

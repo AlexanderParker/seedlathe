@@ -11,6 +11,7 @@ enum ParamIdx {
     kVoices,
     kTypeFilter,   // which instrument type the dice rolls, 0 = any
     kOversample,   // 0 = off, 1 = 2x, 2 = 4x; the engine rate multiplier
+    kMultitimbral, // off: every channel plays part 1; on: channel selects the part
     kNumParams
 };
 
@@ -31,5 +32,12 @@ inline int seedLo(uint32_t seed) { return static_cast<int>(seed & 0xFFFFu); }
 inline uint32_t seedFrom(int hi, int lo) {
     return (static_cast<uint32_t>(hi) << 16) | (static_cast<uint32_t>(lo) & 0xFFFFu);
 }
+
+// Sixteen parts, one per MIDI channel. Only part 1's seed is a host parameter:
+// thirty-two more stepped parameters would bury the six that matter in every
+// host's automation list, and nobody automates sixteen seeds at once. The other
+// parts' seeds travel in the state chunk instead, so they survive save and
+// reload but cannot be automated.
+inline constexpr int kNumParts = 16;
 
 } // namespace sl

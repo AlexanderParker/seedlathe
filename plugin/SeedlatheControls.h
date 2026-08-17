@@ -165,6 +165,77 @@ private:
     int mSelected = 0;
 };
 
+// The sixteen multitimbral parts, as two rows of eight.
+//
+// Two rows because sixteen cells in one row across the space the top bar has
+// spare would be 22 px each, which is not a click target. Parts that have never
+// been addressed are drawn dimmer than the rest: they cost nothing until
+// selected, and showing that is the difference between "empty" and "broken".
+class PartStripControl : public IControl {
+public:
+    using CountFunc = std::function<bool(int index)>;   // is this part allocated
+    using SelectFunc = std::function<void(int index)>;
+
+    PartStripControl(const IRECT& bounds, int numParts, CountFunc allocated,
+                     SelectFunc onSelect)
+    : IControl(bounds), mNumParts(numParts), mAllocated(std::move(allocated)),
+      mOnSelect(std::move(onSelect)) {}
+
+    void SetSelected(int i) { mSelected = i; SetDirty(false); }
+    void SetEnabled(bool on) { mEnabled = on; SetDirty(false); }
+
+    void Draw(IGraphics& g) override {
+        const IRECT grid = mRECT.GetReducedFromTop(12.f);
+        g.DrawText(IText(10.f, IColor(255, 130, 140, 155), nullptr, EAlign::Near),
+                   mEnabled ? "PART (MIDI CHANNEL)" : "PART -- multitimbral is off",
+                   mRECT.GetFromTop(12.f));
+
+        const float w = grid.W() / 8.f;
+        const float h = grid.H() / 2.f;
+        for (int i = 0; i < mNumParts; ++i) {
+            const int col = i % 8, row = i / 8;
+            const IRECT cell(grid.L + w * col, grid.T + h * row,
+                             grid.L + w * (col + 1), grid.T + h * (row + 1));
+            const bool live = mAllocated && mAllocated(i);
+            const bool sel = (i == mSelected);
+
+            IColor fill = IColor(255, 26, 29, 34);
+            if (sel) fill = IColor(255, 62, 116, 178);
+            else if (live) fill = IColor(255, 42, 47, 56);
+            g.FillRoundRect(fill, cell.GetPadded(-1.f), 3.f);
+
+            IColor text = mEnabled ? (live ? IColor(255, 208, 214, 222)
+                                          : IColor(255, 96, 104, 118))
+                                   : IColor(255, 70, 76, 88);
+            if (sel) text = IColor(255, 250, 252, 255);
+
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "%d", i + 1);
+            g.DrawText(IText(10.f, text, nullptr, EAlign::Center), buf, cell);
+        }
+    }
+
+    void OnMouseDown(float x, float y, const IMouseMod&) override {
+        if (!mEnabled) return;
+        const IRECT grid = mRECT.GetReducedFromTop(12.f);
+        if (!grid.Contains(x, y)) return;
+        const int col = std::clamp(static_cast<int>((x - grid.L) / (grid.W() / 8.f)), 0, 7);
+        const int row = std::clamp(static_cast<int>((y - grid.T) / (grid.H() / 2.f)), 0, 1);
+        const int i = row * 8 + col;
+        if (i >= mNumParts || i == mSelected) return;
+        mSelected = i;
+        if (mOnSelect) mOnSelect(i);
+        SetDirty(false);
+    }
+
+private:
+    int mNumParts;
+    CountFunc mAllocated;
+    SelectFunc mOnSelect;
+    int mSelected = 0;
+    bool mEnabled = false;
+};
+
 // Text entry that is not attached to a parameter.
 //
 // IGraphics only delivers OnTextEntryCompletion to the control that opened the

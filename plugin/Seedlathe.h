@@ -8,17 +8,16 @@
 #include "SeedlatheControls.h"
 #include "SeedlatheDesigner.h"
 #include "SeedlatheParams.h"
-#include "RackPool.h"
+#include "SeedlathePart.h"
 #include "SampleMatch.h"
 #include "Oversampler.h"
 #include "UserPresets.h"
 #include "SeedSearch.h"
-#include "SharedFxRack.h"
-#include "Voice.h"
 #include "sl/Instrument.h"
 #include "webaudio/WaCompressor.h"
 
 #include <array>
+#include <functional>
 #include <string>
 #include <atomic>
 #include <chrono>
@@ -26,6 +25,11 @@
 #include <vector>
 
 const int kNumPresets = 1;
+
+// Bumped whenever the layout after the parameters changes. A mis-read there
+// loads the wrong instrument silently rather than failing, so the version is
+// checked before anything is trusted.
+constexpr int kStateVersion = 2;
 
 enum EControlTags
 {
@@ -42,6 +46,7 @@ enum EControlTags
   kCtrlTagSampleStatus,
   kCtrlTagExportStatus,
   kCtrlTagPresetStatus,
+  kCtrlTagPartStrip,
   kNumCtrlTags
 };
 
@@ -80,6 +85,10 @@ private:
   // Applies a change of oversampling factor, with the handshake that makes
   // reallocating under a running audio thread safe.
   void Reconfigure();
+
+  // Runs `work` with the audio thread known not to be inside ProcessBlock.
+  // Everything that reallocates engine buffers goes through here.
+  void Quiesce(const std::function<void()>& work);
   void SetSeed(uint32_t seed);
   void RollRandomSeed();
   void RefreshSeedDisplay();
@@ -92,7 +101,13 @@ private:
   // retries. Without the queue, the last value of a drag could be dropped: the
   // refusals during the drag coalesce harmlessly, but a refusal on the final
   // value would leave the sound permanently out of step with the controls.
-  void ServicePending();
+  void ServicePending(seedlathe::Part& part);
+  void ServiceAllPending();
+
+  // Allocates a part's engine if it has none yet. Message thread, behind the
+  // same quiescence handshake Reconfigure uses.
+  void EnsurePart(int index);
+  void SelectPart(int index);
 
   // Re-reads every designer control from mEdit. Called after anything replaces
   // the instrument wholesale -- seed change, preset load, oscillator switch.
@@ -116,14 +131,16 @@ private:
   void DeleteSelectedPreset();
   sl::Osc& EditOsc();
 
-  // A pool of racks, not one. Rebuilding a rack frees and reallocates every
-  // buffer inside it, so it may only ever target a rack the audio thread
-  // cannot reach -- dragging the seed control used to segfault on exactly
-  // that. RackPool owns the rule.
-  static constexpr int kNumRacks = 4;
-  sl::RackPool mRacks;
+  // Sixteen parts, all but the first allocated only when something addresses
+  // them. See SeedlathePart.h for why they cannot share racks and why that
+  // makes lazy allocation worth the bookkeeping.
+  std::array<seedlathe::Part, sl::kNumParts> mParts;
+  int mEditPart = 0;
+  bool mMulti = false;
 
-  sl::VoicePool mPool;
+  seedlathe::Part& P() { return mParts[static_cast<size_t>(mEditPart)]; }
+  const seedlathe::Part& P() const { return mParts[static_cast<size_t>(mEditPart)]; }
+
   sl::WaCompressor mComp;
   sl::SeedSearchRunner mSearch;
 
@@ -138,17 +155,7 @@ private:
   std::string mSelectedUserPreset;
   seedlathe::TextPromptControl* mPrompt = nullptr;
 
-  // Double buffer: the message thread writes the inactive slot and flips the
-  // index, the audio thread only ever reads the published one.
-  std::array<sl::Instrument, 2> mInstruments{};
-  std::atomic<int> mLive{0};
 
-  // The designer's working copy. Edits land here, then ServicePending hands a
-  // snapshot to the audio thread through the double buffer above.
-  sl::Instrument mEdit{};
-  bool mEdited = false;
-  bool mPendingPublish = false;
-  int mDesignOsc = 0;
 
   // Gathered during layout so the designer can be refreshed without RTTI.
   // Cleared at the top of the layout function, and only used while GetUI() is
@@ -156,15 +163,15 @@ private:
   std::vector<seedlathe::DesignerControl*> mDesignerControls;
 
   std::vector<float> mLeft, mRight;
-  uint32_t mCurrentSeed = 0;
-  bool mHasSeed = false;
-  bool mRacksBuilt = false;
 
   // Oversampling. 1, 2 or 4; the engine is prepared at that multiple of the
   // host rate and the decimator brings each block back down.
   int mOsFactor = 1;
   sl::Decimator mDecimL, mDecimR;
   std::vector<float> mDownL, mDownR;
+
+  // Scratch for one part's render before it is summed into the bus.
+  std::vector<float> mPartL, mPartR;
 
   // The handshake that lets the message thread reallocate the engine. Odd means
   // a block is in flight; the flag makes new blocks bail out without touching
