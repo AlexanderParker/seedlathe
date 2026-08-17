@@ -66,6 +66,7 @@ void Voice::noteOn(SharedFxRack* rack, const Instrument& inst, int note,
     inst_ = inst;
     note_ = note;
     sustained_ = sustained;
+    sustainHeld_ = false;
     released_ = false;
     active_ = true;
     t_ = 0.0;
@@ -198,6 +199,7 @@ void Voice::noteOn(SharedFxRack* rack, const Instrument& inst, int note,
 
 void Voice::noteOff() {
     if (!active_ || released_) return;
+    sustainHeld_ = false;
     released_ = true;
     releaseStart_ = t_;
     // zyn's Z.noteOff: ramp from the current value to zero over the
@@ -252,7 +254,9 @@ void Voice::renderOscillator(int oscIndex, int frames, int outOffset,
                                   [static_cast<size_t>(idx)] * edge.gain;
             }
 
-            sample = s.osc.render(freq);
+            // One multiply, unconditionally: the branch that would skip it
+            // when nothing is bent costs more than the multiply it saves.
+            sample = s.osc.render(freq * bendRatio_);
         }
 
         // Raw oscillator output feeds the FM matrix history.
@@ -368,7 +372,11 @@ void VoicePool::prepare(double sampleRate, int maxVoices) {
 void VoicePool::noteOn(SharedFxRack* rack, const Instrument& inst, int note,
                        double gain, bool sustained) {
     for (auto& v : voices_) {
-        if (!v.active()) { v.noteOn(rack, inst, note, gain, sustained); return; }
+        if (!v.active()) {
+            v.noteOn(rack, inst, note, gain, sustained);
+            v.setBendRatio(std::pow(2.0, bendSemitones_ / 12.0));
+            return;
+        }
     }
     // Steal the quietest, breaking ties by age.
     Voice* victim = &voices_[0];
@@ -379,14 +387,36 @@ void VoicePool::noteOn(SharedFxRack* rack, const Instrument& inst, int note,
     }
     victim->kill();
     victim->noteOn(rack, inst, note, gain, sustained);
+    victim->setBendRatio(std::pow(2.0, bendSemitones_ / 12.0));
 }
 
 void VoicePool::noteOff(int note) {
+    for (auto& v : voices_) {
+        if (!v.active() || v.released() || v.note() != note) continue;
+        if (sustainPedal_) v.holdForSustain();
+        else v.noteOff();
+    }
+}
+
+void VoicePool::setPitchBend(double semitones) {
+    bendSemitones_ = semitones;
+    const double ratio = std::pow(2.0, semitones / 12.0);
+    for (auto& v : voices_) v.setBendRatio(ratio);
+}
+
+void VoicePool::setSustainPedal(bool on) {
+    if (on == sustainPedal_) return;
+    sustainPedal_ = on;
+    if (on) return;
+    // Lifting the pedal releases everything whose key was already let go.
     for (auto& v : voices_)
-        if (v.active() && !v.released() && v.note() == note) v.noteOff();
+        if (v.active() && v.sustainHeld()) v.noteOff();
 }
 
 void VoicePool::allNotesOff() {
+    // Panic beats the pedal: All Notes Off means silence now, whatever the
+    // controller last said about CC 64.
+    sustainPedal_ = false;
     for (auto& v : voices_) v.kill();
 }
 

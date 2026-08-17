@@ -1334,10 +1334,28 @@ void Seedlathe::ProcessMidiMsg(const IMidiMsg& msg)
   {
     part.pool.noteOff(msg.NoteNumber() - kMidiMiddleC + octave * 12);
   }
-  else if (status == IMidiMsg::kControlChange &&
-           msg.ControlChangeIdx() == IMidiMsg::kAllNotesOff)
+  else if (status == IMidiMsg::kPitchWheel)
   {
-    part.pool.allNotesOff();
+    // PitchWheel() is -1..1. Two semitones each way is the MIDI default and
+    // what a controller assumes when nothing has told it otherwise.
+    part.pool.setPitchBend(msg.PitchWheel() * 2.0);
+  }
+  else if (status == IMidiMsg::kControlChange)
+  {
+    switch (msg.ControlChangeIdx())
+    {
+      case IMidiMsg::kAllNotesOff:
+        part.pool.allNotesOff();
+        break;
+      case IMidiMsg::kSustainOnOff:
+        // The MIDI convention: 64 and above is down. Some pedals only ever
+        // send 0 and 127, others sweep, and treating anything non-zero as down
+        // makes a half-pedal position stick.
+        part.pool.setSustainPedal(msg.ControlChange(IMidiMsg::kSustainOnOff) >= 0.5);
+        break;
+      default:
+        break;
+    }
   }
 }
 

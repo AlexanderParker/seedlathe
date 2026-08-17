@@ -35,6 +35,16 @@ public:
 
     const SharedFxRack* rack() const { return rack_; }
     void noteOff();
+
+    // The key was let go while the sustain pedal was down: the note keeps
+    // sounding, and releases when the pedal does.
+    void holdForSustain() { sustainHeld_ = true; }
+    bool sustainHeld() const { return sustainHeld_; }
+
+    // Pitch bend as a frequency ratio, applied after every modulation source
+    // rather than to the base pitch: bending a note bends its vibrato and its
+    // FM sidebands with it, which is what a detune input does in Web Audio.
+    void setBendRatio(double ratio) { bendRatio_ = ratio; }
     void kill();                    // immediate, for voice stealing
 
     // Renders `frames` samples into the shared FX graph's block buffers.
@@ -111,6 +121,8 @@ private:
     bool active_ = false;
     bool sustained_ = false;
     bool released_ = false;
+    bool sustainHeld_ = false;
+    double bendRatio_ = 1.0;
     int note_ = 0;
     double level_ = 0.0;
     double t_ = 0.0;
@@ -136,6 +148,17 @@ public:
     void noteOff(int note);
     void allNotesOff();
 
+    // MIDI CC 64. Note-offs arriving while this is on are deferred until it
+    // goes off, which is what every player expects a pedal to do and what a
+    // synth that ignores it is immediately noticed for.
+    void setSustainPedal(bool on);
+    bool sustainPedal() const { return sustainPedal_; }
+
+    // MIDI pitch wheel, in semitones. Applies to sounding notes and to any
+    // started afterwards, until it is set again.
+    void setPitchBend(double semitones);
+    double pitchBend() const { return bendSemitones_; }
+
     // Mixes every rack that sounding voices reference, and -- when the caller
     // supplies the full set -- every rack still ringing. A reverb tail
     // outlives the note that caused it, so dropping a rack the moment its last
@@ -159,6 +182,8 @@ private:
     std::vector<SharedFxRack*> racks_;   // distinct racks among active voices
     std::vector<float> mixL_, mixR_;
     double sampleRate_ = 48000.0;
+    bool sustainPedal_ = false;
+    double bendSemitones_ = 0.0;
 };
 
 } // namespace sl

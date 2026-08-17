@@ -122,7 +122,8 @@ installed:
 - CLAP: `%LOCALAPPDATA%\Programs\Common\CLAP\Seedlathe.clap`
 
 Rescan plugins in your DAW, add Seedlathe to an instrument track, and play.
-It responds to note on/off, velocity, and all-notes-off.
+It responds to note on/off, velocity, all-notes-off, the sustain pedal (CC 64)
+and the pitch wheel (±2 semitones, the MIDI default).
 
 With **Multitimbral** on (Instrument page), the MIDI channel selects the part, and a
 channel whose part has not been allocated yet is silent — click its number in the part
