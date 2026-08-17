@@ -17,6 +17,9 @@ if(MSVC)
   # /fp:precise is load-bearing: /fp:fast lets MSVC reassociate floating-point
   # expressions, which breaks exact golden-vector equality against zyn.js.
   add_compile_options(/fp:precise)
+  # AVX2 for the convolution hot loop. Baseline for audio plugins since ~2013;
+  # revisit with runtime dispatch if older CPUs must be supported.
+  add_compile_options(/arch:AVX2)
   add_compile_definitions(_USE_MATH_DEFINES NOMINMAX)
   # /W4 is applied per-target, not globally: iPlug2's own sources emit
   # thousands of C4100/C4244 warnings at that level and bury real ones.

@@ -41,12 +41,19 @@ double partialAmplitude(Waveform w, unsigned n) {
     }
 }
 
+} // namespace
+
+// At namespace scope rather than in the anonymous namespace above: the header
+// forward-declares sl::WaveTables so WaOscillator can cache a pointer to its
+// table set instead of re-resolving it under a mutex on every sample.
 struct WaveTables {
     unsigned size = 0;
     unsigned ranges = 0;
     double lowestFundamental = 0.0;
     std::vector<std::vector<float>> table;   // [range][sample]
 };
+
+namespace {
 
 WaveTables buildTables(Waveform w, double sampleRate) {
     WaveTables t;
@@ -117,16 +124,27 @@ float readTable(const std::vector<float>& tab, double phase, unsigned size) {
 
 } // namespace
 
+// Defined at namespace scope, not in the anonymous namespace: the header
+// forward-declares sl::WaveTables so WaOscillator can cache a pointer.
+
 void WaOscillator::prepare(double sampleRate) {
     sampleRate_ = sampleRate;
     phase_ = 0.0;
     tablesFor(Waveform::Sine, sampleRate);   // build once, off the audio thread
+    tables_ = &tablesFor(type_, sampleRate);
 }
 
-void WaOscillator::setType(Waveform w) { type_ = w; }
+void WaOscillator::setType(Waveform w) {
+    type_ = w;
+    // Resolve the table set here, not in render(). tablesFor takes a mutex, and
+    // taking one per oscillator per sample -- main oscillators, LFOs and FM
+    // modulators alike -- was a large share of the voice path's cost.
+    tables_ = &tablesFor(w, sampleRate_);
+}
 
 double WaOscillator::render(double freqHz) {
-    const WaveTables& t = tablesFor(type_, sampleRate_);
+    if (!tables_) tables_ = &tablesFor(type_, sampleRate_);
+    const WaveTables& t = *tables_;
 
     // Blink's range selection, verbatim in spirit:
     //   ratio  = f / lowestFundamental   (0.5 when f <= 0)

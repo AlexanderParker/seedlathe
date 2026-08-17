@@ -26,15 +26,15 @@ public:
         sin_.resize(n_ / 2);
         for (size_t i = 0; i < n_ / 2; ++i) {
             const double a = -2.0 * 3.14159265358979323846 * double(i) / double(n_);
-            cos_[i] = std::cos(a);
-            sin_[i] = std::sin(a);
+            cos_[i] = static_cast<float>(std::cos(a));
+            sin_[i] = static_cast<float>(std::sin(a));
         }
     }
 
     size_t size() const { return n_; }
 
     // In-place. inverse == true conjugates the twiddles and scales by 1/n.
-    void transform(std::vector<double>& re, std::vector<double>& im, bool inverse) const {
+    void transform(std::vector<float>& re, std::vector<float>& im, bool inverse) const {
         for (size_t i = 0; i < n_; ++i) {
             const size_t j = rev_[i];
             if (j > i) { std::swap(re[i], re[j]); std::swap(im[i], im[j]); }
@@ -44,18 +44,18 @@ public:
             const size_t step = n_ / len;
             for (size_t i = 0; i < n_; i += len) {
                 for (size_t k = 0; k < half; ++k) {
-                    const double wr = cos_[k * step];
-                    const double wi = inverse ? -sin_[k * step] : sin_[k * step];
+                    const float wr = cos_[k * step];
+                    const float wi = inverse ? -sin_[k * step] : sin_[k * step];
                     const size_t a = i + k, b = i + k + half;
-                    const double tr = re[b] * wr - im[b] * wi;
-                    const double ti = re[b] * wi + im[b] * wr;
+                    const float tr = re[b] * wr - im[b] * wi;
+                    const float ti = re[b] * wi + im[b] * wr;
                     re[b] = re[a] - tr; im[b] = im[a] - ti;
                     re[a] += tr;        im[a] += ti;
                 }
             }
         }
         if (inverse) {
-            const double s = 1.0 / double(n_);
+            const float s = 1.0f / float(n_);
             for (size_t i = 0; i < n_; ++i) { re[i] *= s; im[i] *= s; }
         }
     }
@@ -63,7 +63,7 @@ public:
 private:
     size_t n_;
     std::vector<size_t> rev_;
-    std::vector<double> cos_, sin_;
+    std::vector<float> cos_, sin_;
 };
 
 } // namespace sl

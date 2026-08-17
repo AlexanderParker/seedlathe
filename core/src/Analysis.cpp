@@ -68,20 +68,20 @@ MelSpectrogram melSpectrogram(const std::vector<float>& signal, double sampleRat
     out.bands = kBands;
     out.data.assign(static_cast<size_t>(out.frames) * kBands, 0.0f);
 
-    std::vector<double> re(static_cast<size_t>(kFftSize)), im(static_cast<size_t>(kFftSize));
+    std::vector<float> re(static_cast<size_t>(kFftSize)), im(static_cast<size_t>(kFftSize));
     std::vector<double> power(static_cast<size_t>(nBins));
 
     for (int f = 0; f < out.frames; ++f) {
         const size_t off = static_cast<size_t>(f) * kHop;
         for (int i = 0; i < kFftSize; ++i) {
-            re[static_cast<size_t>(i)] =
-                double(signal[off + static_cast<size_t>(i)]) * window[static_cast<size_t>(i)];
-            im[static_cast<size_t>(i)] = 0.0;
+            re[static_cast<size_t>(i)] = static_cast<float>(
+                double(signal[off + static_cast<size_t>(i)]) * window[static_cast<size_t>(i)]);
+            im[static_cast<size_t>(i)] = 0.0f;
         }
         fft.transform(re, im, false);
         for (int k = 0; k < nBins; ++k)
-            power[static_cast<size_t>(k)] = re[static_cast<size_t>(k)] * re[static_cast<size_t>(k)] +
-                                            im[static_cast<size_t>(k)] * im[static_cast<size_t>(k)];
+            power[static_cast<size_t>(k)] = double(re[static_cast<size_t>(k)]) * double(re[static_cast<size_t>(k)]) +
+                                            double(im[static_cast<size_t>(k)]) * double(im[static_cast<size_t>(k)]);
 
         for (int b = 0; b < kBands; ++b) {
             double sum = 0.0;

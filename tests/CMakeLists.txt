@@ -16,6 +16,7 @@ add_executable(sl_tests
   test_fidelity.cpp
   test_seedsplit.cpp
   test_realtime.cpp
+  test_perf.cpp
 )
 
 target_link_libraries(sl_tests PRIVATE sl_core Catch2::Catch2WithMain)

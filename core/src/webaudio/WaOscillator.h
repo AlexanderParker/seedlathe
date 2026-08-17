@@ -12,6 +12,8 @@ namespace sl {
 // This matters because Web Audio oscillators do not alias. A naive ramp or
 // pulse would fold every partial above Nyquist back onto non-harmonic
 // frequencies and no amount of downstream filtering would recover it.
+struct WaveTables;
+
 class WaOscillator {
 public:
     void prepare(double sampleRate);
@@ -25,6 +27,7 @@ public:
 
 private:
     Waveform type_ = Waveform::Sine;
+    const WaveTables* tables_ = nullptr;
     double sampleRate_ = 48000.0;
     double phase_ = 0.0;
 };

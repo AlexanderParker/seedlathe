@@ -66,6 +66,7 @@ void Voice::noteOn(const Instrument& inst, int note, double gain, bool sustained
     level_ = 0.0;
     endTime_ = 0.0;
     startStamp_ = ++g_stamp;
+    coeffCounter_ = 0;
 
     const int n = inst_.oscCount;
     // zyn: voiceGain = 1 / (notes * oscs), and layer.gain = 0.5 * gain.
@@ -246,6 +247,14 @@ void Voice::process() {
         double cutoff = s.filterEnv.valueAt(t_);
         if (s.hasFLfo) cutoff += s.fLfo.render(c.fLfo.frequency) * s.fLfoDepth;
         const double q = s.qEnv.valueAt(t_);
+        // Coefficients are refreshed every kCoeffInterval samples rather than
+        // every sample. Recomputing them costs about seven times the filtering
+        // itself -- two transcendentals plus a pow -- and at polyphony that
+        // alone blew the audio callback's deadline. The envelopes driving
+        // cutoff and Q are linear ramps, so at 48 kHz this quantises them to
+        // 0.17 ms. The cost to fidelity is measured, not assumed: see
+        // vectors/fidelity-thresholds.json.
+        if (coeffCounter_ == 0)
         // ALWAYS lowpass, regardless of osc.filterType. zyn generates a
         // filterType into every oscillator and then never assigns it to the
         // node -- render() creates the BiquadFilterNode and sets only .Q and
@@ -276,6 +285,7 @@ void Voice::process() {
         e.pos = (e.pos + 1) % e.len;
     }
 
+    if (++coeffCounter_ >= kCoeffInterval) coeffCounter_ = 0;
     level_ = peak;
     t_ += 1.0 / sampleRate_;
 

@@ -75,10 +75,10 @@ public:
 
 private:
     struct Channel {
-        std::vector<std::vector<double>> fdlRe, fdlIm;  // input spectrum history
-        std::vector<double> overlap;
-        std::vector<double> inBlock;
-        std::vector<double> outBlock;
+        std::vector<std::vector<float>> fdlRe, fdlIm;  // input spectrum history
+        std::vector<float> overlap;
+        std::vector<float> inBlock;
+        std::vector<float> outBlock;
         size_t fill = 0;
         size_t fdlPos = 0;
         size_t outPos = 0;
@@ -92,13 +92,19 @@ private:
     double outL_ = 0.0, outR_ = 0.0;
     size_t blockSize_ = 256;
     size_t partitions_ = 0;
-    std::vector<std::vector<double>> irRe_, irIm_;
+    std::vector<std::vector<float>> irRe_, irIm_;
     Channel left_, right_;
+
+    // Once the input has been silent for longer than the tail, the output is
+    // zero and there is nothing to compute. Without this every reverb an
+    // instrument owns keeps convolving forever after the last note ends.
+    size_t irLength_ = 0;
+    size_t silentBlocks_ = 0;
 
     // Scratch for processBlock, allocated once in buildImpulse. Creating these
     // per call cost 16 allocations per audio callback -- see
     // tests/test_realtime.cpp.
-    std::vector<double> scratchRe_, scratchIm_, accRe_, accIm_;
+    std::vector<float> scratchRe_, scratchIm_, accRe_, accIm_;
 };
 
 // StereoPannerNode's equal-power law for a mono input.

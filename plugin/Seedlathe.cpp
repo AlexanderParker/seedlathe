@@ -4,6 +4,8 @@
 #include "sl/InstrumentGen.h"
 
 #include <algorithm>
+#include <pmmintrin.h>
+#include <xmmintrin.h>
 
 namespace {
 // zyn's demo maps MIDI note 60 to zyn note 0 (middle C).
@@ -127,6 +129,13 @@ void Seedlathe::ProcessMidiMsg(const IMidiMsg& msg)
 
 void Seedlathe::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
 {
+  // Flush denormals for the duration of the callback. Decaying reverb and
+  // delay tails run down toward 1e-38, where the CPU falls back to microcode
+  // and costs orders of magnitude more per operation. Measured at only ~1.1x
+  // here, but it is free and it is what every host expects a plugin to do.
+  const unsigned mxcsr = _mm_getcsr();
+  _mm_setcsr(mxcsr | 0x8040);   // FTZ | DAZ
+
   const int nChans = NOutChansConnected();
 
   if (static_cast<int>(mLeft.size()) < nFrames)
@@ -135,6 +144,7 @@ void Seedlathe::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
     // allocate on the audio thread.
     for (int c = 0; c < nChans; ++c)
       for (int s = 0; s < nFrames; ++s) outputs[c][s] = 0.;
+    _mm_setcsr(mxcsr);
     return;
   }
 
@@ -147,6 +157,8 @@ void Seedlathe::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
     if (nChans > 0) outputs[0][s] = l;
     if (nChans > 1) outputs[1][s] = r;
   }
+
+  _mm_setcsr(mxcsr);
 }
 
 #endif

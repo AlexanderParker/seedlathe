@@ -86,6 +86,10 @@ private:
     double releaseLen_ = 0.0;
     double releaseFrom_ = 1.0;
     uint64_t startStamp_ = 0;
+
+    // Filter coefficients are refreshed on this cadence, not every sample.
+    static constexpr int kCoeffInterval = 8;
+    int coeffCounter_ = 0;
 };
 
 // Fixed pool with stealing. zyn creates nodes without bound, which is fine in
