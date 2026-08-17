@@ -232,6 +232,8 @@ SampleSearch::Result SampleSearch::run(const SoundFeatures& target,
         const double score = sampleSimilarity(target, featuresOfInstrument(cand, note));
 
         ++best.tested;
+        best.lastSeed = seed;
+        best.lastScore = score;
         const bool improved = score > best.score;
         if (improved) {
             best.seed = seed;
@@ -280,6 +282,7 @@ void SampleSearchRunner::start(int typeFilter, double threshold) {
     bestSeed_.store(0, std::memory_order_release);
     tested_.store(0, std::memory_order_release);
     found_.store(false, std::memory_order_release);
+    top_.clear();
 
     // Leave a core for the audio thread and the UI. Rendering is the whole cost
     // here, so saturating every core makes the plugin stutter for no gain.
@@ -300,6 +303,7 @@ void SampleSearchRunner::start(int typeFilter, double threshold) {
                 [this] { return cancel_.load(std::memory_order_acquire); },
                 [this, threshold](const SampleSearch::Result& r) {
                     tested_.fetch_add(1, std::memory_order_relaxed);
+                    if (r.lastScore >= 0.0) top_.offer(r.lastSeed, r.lastScore);
                     if (!r.found) return;
 
                     double current = bestScore_.load(std::memory_order_acquire);

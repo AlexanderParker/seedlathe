@@ -6,6 +6,25 @@ A seed-driven procedural synthesizer plugin (VST3 / CLAP / standalone), built on
 Type or roll a 32-bit integer and get a complete instrument. The same seed sounds the
 same here as it does on the zyn demo page — enforced by automated tests, not by ear.
 
+## What it does
+
+- **Seeds.** Type, drag or roll a seed; the whole 32-bit value is one control, even
+  though the host sees it as two parameters (see `plugin/SeedlatheParams.h` for why).
+- **Similarity search.** Finds seeds close to the current instrument at around 1.6
+  million candidates a second, and keeps the twenty best so the near misses can be
+  auditioned too — they are often the ones worth keeping.
+- **Sample match.** Load a recording and search for the seed that sounds most like it.
+  Each candidate is rendered offline and compared on timbre, amplitude shape and
+  brightness, which runs at hundreds of candidates a second rather than millions.
+- **Designer.** Edit any generated instrument directly: five oscillators, draggable
+  envelopes, three LFOs, FM, pitch envelope, distortion, per-oscillator delay and
+  reverb, and the 5×5 FM matrix. Patches copy and paste as zyn's own JSON.
+- **Presets.** 115 factory presets from the demo page, plus your own bank.
+- **Multitimbral.** Sixteen parts, one per MIDI channel, allocated as you use them.
+- **Oversampling.** 2× or 4×, off by default — it is a deviation from zyn, which runs
+  its graph at the host rate.
+- **Export.** Render the current instrument to a 32-bit float stereo WAV.
+
 - Design: [`docs/superpowers/specs/2026-08-17-seedlathe-vst-design.md`](docs/superpowers/specs/2026-08-17-seedlathe-vst-design.md)
 - Current plan: [`docs/superpowers/plans/2026-08-17-seedlathe-p0-p1-engine.md`](docs/superpowers/plans/2026-08-17-seedlathe-p0-p1-engine.md)
 
@@ -80,18 +99,19 @@ there and compare.
 ### 2. Standalone app
 
 Run `build/out/Seedlathe.exe`. **Click the on-screen keyboard** to play —
-it sends real MIDI internally, so no controller is required. Set the seed with
-the two number boxes: a 32-bit seed is split across `Seed Hi` and `Seed Lo`
-(see `plugin/SeedlatheParams.h` for why), so
+it sends real MIDI internally, so no controller is required.
 
-```
-seed = SeedHi * 65536 + SeedLo
-```
-
-For example seed 3703184240 is `Seed Hi 56506`, `Seed Lo 7024`.
+The seed box at the top left takes the whole 32-bit value: click to type, drag to
+nudge, wheel to step, shift for coarse and ctrl for fine. The host still sees two
+16-bit parameters underneath (`seed = SeedHi * 65536 + SeedLo`, so 3703184240 is
+`Seed Hi 56506`, `Seed Lo 7024`), because a single float32 automation value cannot
+round-trip a 32-bit integer.
 
 If you hear nothing, open the app's **Preferences** dialog and pick the right
 audio output device and sample rate.
+
+Note that the standalone does not persist plugin state between runs — only a host
+does. Use the preset bank to keep patches.
 
 ### 3. In a DAW
 
@@ -103,3 +123,22 @@ installed:
 
 Rescan plugins in your DAW, add Seedlathe to an instrument track, and play.
 It responds to note on/off, velocity, and all-notes-off.
+
+With **Multitimbral** on (Instrument page), the MIDI channel selects the part, and a
+channel whose part has not been allocated yet is silent — click its number in the part
+strip to bring it up. Only part 1's seed is a host parameter; the rest travel in the
+state chunk, so they survive save and reload but cannot be automated.
+
+## Fidelity
+
+The acceptance gate is `tests/test_fidelity.cpp`: 60 seeds rendered by this engine and
+by real Chrome through an `OfflineAudioContext`, compared as log-mel spectrograms and
+RMS envelopes. Both one-shot notes and held notes are covered.
+
+| Set | Seeds | Mean mel distance | Threshold |
+|---|---|---|---|
+| One-shot | 60 | 2.28 dB | 2.75 dB |
+| Sustained | 60 | 2.67 dB | 3.2 dB |
+
+Regenerate the references with `node tools/export-reference-audio.mjs` (add
+`--sustained` for the held-note set). Both need Chrome and `puppeteer-core`.

@@ -1,4 +1,5 @@
 #pragma once
+#include "TopResults.h"
 #include "sl/Instrument.h"
 
 #include <atomic>
@@ -65,6 +66,13 @@ public:
         double score = -1.0;
         uint64_t tested = 0;
         bool found = false;
+
+        // The candidate just scored, whatever it scored. Unlike the
+        // parameter-space search this reports every candidate -- there are only
+        // a few dozen a second -- so the runner can merge them from several
+        // workers into one shared list of runners-up.
+        uint32_t lastSeed = 0;
+        double lastScore = -1.0;
     };
 
     // typeFilter: 0 for any instrument type, or 1-10 to fix the seed's last
@@ -100,6 +108,7 @@ public:
     bool running() const { return running_.load(std::memory_order_acquire); }
 
     SampleSearch::Result best() const;
+    std::vector<Candidate> top() const { return top_.read(); }
 
 private:
     void join();
@@ -119,6 +128,7 @@ private:
     mutable std::atomic<double> bestScore_{-1.0};
     std::atomic<uint64_t> tested_{0};
     std::atomic<bool> found_{false};
+    TopSnapshot top_;
 };
 
 } // namespace sl

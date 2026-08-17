@@ -249,6 +249,16 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
           [this](IControl*) { mSearch.cancel(); }, "Stop", style), kNoTag, "search");
       g->AttachControl(new ITextControl(page.GetReducedFromTop(94.f).GetFromTop(28.f),
           "Idle", IText(15.f, kTextCol)), kCtrlTagSearchStatus, "search");
+
+      // The runners-up, not just the winner. A search that reports one seed
+      // throws away the interesting part: the near misses are usually worth
+      // hearing, and often preferred to the top score.
+      g->AttachControl(new ITextControl(page.GetReducedFromTop(126.f).GetFromTop(18.f),
+          "Best matches -- click to load",
+          IText(11.f, kDim, nullptr, EAlign::Near)), kNoTag, "search");
+      g->AttachControl(new ListControl(page.GetReducedFromTop(146.f).GetFromLeft(560.f),
+          [this](int payload) { SetSeed(static_cast<uint32_t>(payload)); }),
+          kCtrlTagResultList, "search");
     }
 
     // -- Sample match and WAV export
@@ -825,13 +835,20 @@ void Seedlathe::BuildSamplePage(IGraphics* g, const IRECT& page, const IVStyle& 
   g->AttachControl(new ITextControl(page.GetReducedFromTop(144.f).GetFromTop(28.f),
       "Idle", IText(15.f, kTextCol)), kCtrlTagSampleStatus, "sample");
 
-  g->AttachControl(new ITextControl(page.GetReducedFromTop(180.f).GetFromTop(40.f),
-      "The Roll type knob restricts which instrument type is searched.\n"
-      "Candidates are rendered at the sample's detected pitch.",
-      IText(12.f, IColor(255, 110, 118, 130))), kNoTag, "sample");
+  g->AttachControl(new ITextControl(page.GetReducedFromTop(178.f).GetFromTop(18.f),
+      "Roll type restricts which type is searched. Candidates are rendered at "
+      "the sample's detected pitch.",
+      IText(11.f, IColor(255, 110, 118, 130), nullptr, EAlign::Near)),
+      kNoTag, "sample");
+
+  // The runners-up, not just the winner.
+  g->AttachControl(new ListControl(
+      page.GetReducedFromTop(200.f).GetFromTop(190.f).GetFromLeft(560.f),
+      [this](int payload) { SetSeed(static_cast<uint32_t>(payload)); }),
+      kCtrlTagSampleResults, "sample");
 
   // ---- export ------------------------------------------------------------
-  const IRECT exportTop = page.GetReducedFromTop(240.f);
+  const IRECT exportTop = page.GetReducedFromTop(400.f);
   g->AttachControl(new ITextControl(exportTop.GetFromTop(24.f),
       "Export the current instrument as a 32-bit float stereo WAV.",
       IText(12.f, kDim)), kNoTag, "sample");
@@ -894,6 +911,41 @@ void Seedlathe::ExportWav()
     }
     c->As<ITextControl>()->SetStr(buf);
   }
+}
+
+void Seedlathe::RefreshResultList(int ctrlTag, const std::vector<sl::Candidate>& top)
+{
+#if IPLUG_EDITOR
+  auto* ui = GetUI();
+  if (!ui) return;
+  auto* c = ui->GetControlWithTag(ctrlTag);
+  if (!c) return;
+
+  // Rebuilding twenty rows at UI rate costs nothing, but doing it when nothing
+  // moved would reset the user's scroll position every frame, so the list is
+  // only replaced when its contents actually changed.
+  auto& cached = (ctrlTag == kCtrlTagResultList) ? mSearchTop : mSampleTop;
+  if (cached.size() == top.size()) {
+    bool same = true;
+    for (size_t i = 0; i < top.size(); ++i)
+      if (cached[i].seed != top[i].seed || cached[i].score != top[i].score) {
+        same = false;
+        break;
+      }
+    if (same) return;
+  }
+  cached = top;
+
+  std::vector<ListControl::Row> rows;
+  rows.reserve(top.size());
+  for (const auto& e : top) {
+    char label[48], detail[32];
+    std::snprintf(label, sizeof(label), "%.2f%%", e.score);
+    std::snprintf(detail, sizeof(detail), "%u", e.seed);
+    rows.push_back({label, detail, false, static_cast<int>(e.seed)});
+  }
+  c->As<ListControl>()->SetRows(std::move(rows));
+#endif
 }
 
 void Seedlathe::RefreshSampleInfo()
@@ -1223,6 +1275,8 @@ void Seedlathe::OnIdle()
   if (mSearchWasRunning && !running && best.found)
     SetSeed(best.seed);
 
+  RefreshResultList(kCtrlTagResultList, mSearch.top());
+
   mSearchWasRunning = running;
 
   // ---- sample match ------------------------------------------------------
@@ -1245,6 +1299,8 @@ void Seedlathe::OnIdle()
 
   if (mSampleSearchWasRunning && !sampleRunning && sampleBest.found)
     SetSeed(sampleBest.seed);
+
+  RefreshResultList(kCtrlTagSampleResults, mSampleSearch.top());
 
   mSampleSearchWasRunning = sampleRunning;
 #endif

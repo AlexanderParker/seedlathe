@@ -21,6 +21,7 @@ add_executable(sl_tests
   test_samplematch.cpp
   test_userpresets.cpp
   test_oversampler.cpp
+  test_topresults.cpp
   test_perf.cpp
 )
 

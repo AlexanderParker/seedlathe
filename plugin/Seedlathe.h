@@ -47,6 +47,7 @@ enum EControlTags
   kCtrlTagExportStatus,
   kCtrlTagPresetStatus,
   kCtrlTagPartStrip,
+  kCtrlTagSampleResults,
   kNumCtrlTags
 };
 
@@ -120,6 +121,7 @@ private:
   void LoadSampleTarget();
   void ExportWav();
   void RefreshSampleInfo();
+  void RefreshResultList(int ctrlTag, const std::vector<sl::Candidate>& top);
 
   // Preset list and the user's own bank. Editor-only: they exist to drive
   // controls, and a DSP-only build has no list to refresh.
@@ -150,6 +152,9 @@ private:
   bool mSampleSearchWasRunning = false;
   std::string mSampleName;
   std::string mSampleError;
+
+  // Last published runners-up, so the lists are only rebuilt when they move.
+  std::vector<sl::Candidate> mSearchTop, mSampleTop;
 
   sl::UserPresetStore mUserPresets;
   std::string mSelectedUserPreset;

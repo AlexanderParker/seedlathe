@@ -161,6 +161,7 @@ SeedSearch::Result SeedSearch::run(const Instrument& target,
                                    const std::function<bool()>& shouldStop,
                                    const std::function<void(const Result&)>& onProgress) {
     Result best;
+    TopList top;
     Mulberry32 rng(rngSeed);
 
     // Candidates are drawn from the target's own type digit, as zyn does. The
@@ -176,6 +177,11 @@ SeedSearch::Result SeedSearch::run(const Instrument& target,
 
             const double score = compareInstruments(target, generateInstrument(seed));
             ++best.tested;
+
+            if (top.offer(seed, score)) {
+                best.top = top.entries();
+                ++best.topRevision;
+            }
 
             if (score > best.score) {
                 best.score = score;
@@ -212,6 +218,7 @@ void SeedSearchRunner::start(const Instrument& target, double threshold) {
     bestScore_.store(-1.0, std::memory_order_release);
     tested_.store(0, std::memory_order_release);
     found_.store(false, std::memory_order_release);
+    top_.clear();
 
     // The target is copied into the thread: it is a fixed-size POD, and the
     // caller's copy may be edited or replaced while the search runs.
@@ -220,11 +227,20 @@ void SeedSearchRunner::start(const Instrument& target, double threshold) {
         static_cast<uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count());
 
     thread_ = std::thread([this, copy, threshold, rngSeed] {
-        auto publish = [this](const SeedSearch::Result& r) {
+        // Copying the runners-up costs a lock, and progress is reported every
+        // batch of a hundred candidates -- sixteen thousand times a second.
+        // The revision counter means the copy happens only when the list
+        // actually moved, which after the first second is rare.
+        uint64_t seenRevision = 0;
+        auto publish = [this, &seenRevision](const SeedSearch::Result& r) {
             bestSeed_.store(r.seed, std::memory_order_relaxed);
             bestScore_.store(r.score, std::memory_order_relaxed);
             tested_.store(r.tested, std::memory_order_relaxed);
             found_.store(r.found, std::memory_order_release);
+            if (r.topRevision != seenRevision) {
+                seenRevision = r.topRevision;
+                top_.publish(r.top);
+            }
         };
         const auto result = SeedSearch::run(
             copy, rngSeed, threshold,

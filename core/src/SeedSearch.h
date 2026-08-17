@@ -1,4 +1,5 @@
 #pragma once
+#include "TopResults.h"
 #include "sl/Instrument.h"
 #include <atomic>
 #include <cstdint>
@@ -29,6 +30,13 @@ public:
         double score = -1.0;
         uint64_t tested = 0;
         bool found = false;
+
+        // The runners-up, best first. A search that reports only its winner
+        // throws away the interesting part: the near misses are often the ones
+        // worth auditioning. `topRevision` lets a poller copy the list only
+        // when it actually changed rather than on every progress report.
+        std::vector<Candidate> top;
+        uint64_t topRevision = 0;
     };
 
     // Runs until `shouldStop` returns true or `threshold` is reached. Reports
@@ -60,6 +68,7 @@ public:
 
     // Safe to poll at UI rate while the search runs.
     SeedSearch::Result best() const;
+    std::vector<Candidate> top() const { return top_.read(); }
 
 private:
     void join();
@@ -72,6 +81,7 @@ private:
     std::atomic<double> bestScore_{-1.0};
     std::atomic<uint64_t> tested_{0};
     std::atomic<bool> found_{false};
+    TopSnapshot top_;
 };
 
 } // namespace sl
