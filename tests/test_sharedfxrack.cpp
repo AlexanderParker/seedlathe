@@ -219,3 +219,75 @@ TEST_CASE("a rack sized to the minimum still routes five distinct effects") {
     // And it must still be silent until something is pushed through it.
     REQUIRE_FALSE(rack.ringing());
 }
+
+TEST_CASE("an unprepared rack refuses routes rather than dividing by zero") {
+    // iPlug2 fires OnParamChange while the plugin is still being constructed,
+    // before OnReset has run, so the rack can be asked for a route with no node
+    // pools at all. The slot arithmetic is a modulo by delays_.size(), and the
+    // plugin died at startup on that before the guard went in.
+    sl::SharedFxRack rack;          // deliberately not prepared
+
+    sl::Osc osc;
+    osc.del.on = true;
+    osc.del.time = 0.2;
+    osc.verb.on = true;
+    osc.verb.duration = 1.0;
+
+    const auto route = rack.acquireRoute(osc);
+    REQUIRE(route.delaySlot == -1);
+    REQUIRE(route.verbSlot == -1);
+    REQUIRE_FALSE(rack.ringing());
+
+    // And prewarm, which walks every oscillator, has to survive it too.
+    sl::Instrument inst;
+    inst.oscCount = 1;
+    inst.oscs[0] = osc;
+    REQUIRE_NOTHROW(rack.prewarm(inst));
+}
+
+TEST_CASE("acquiring the same route twice does not double the reverb send") {
+    // Two oscillators with identical delay and reverb settings share both
+    // nodes, so the delay-to-reverb edge is offered twice with the same pair of
+    // slots. Without the dedup in addEdge the mix walks it twice and the delay
+    // reaches the reverb at double strength -- audible, and it would grow with
+    // every extra oscillator that happened to match.
+    auto energyAfter = [](int acquisitions) {
+        sl::SharedFxRack rack;
+        rack.prepare(48000.0);
+
+        sl::Osc osc;
+        osc.del.on = true;
+        osc.del.time = 0.01;
+        osc.del.feedback = 0.5;
+        osc.verb.on = true;
+        osc.verb.duration = 0.5;
+        osc.verb.decay = 0.8;
+
+        sl::SharedFxRack::Route route;
+        for (int i = 0; i < acquisitions; ++i) route = rack.acquireRoute(osc);
+        rack.buildPending();
+        REQUIRE(route.delaySlot >= 0);
+        REQUIRE(route.verbSlot >= 0);
+
+        // One impulse in, then silence, and measure everything that comes out.
+        std::vector<double> mono(256, 0.0);
+        std::vector<float> l(256), r(256);
+        double energy = 0.0;
+        for (int b = 0; b < 40; ++b) {
+            rack.beginBlock(256);
+            if (b == 0) mono[0] = 1.0; else mono[0] = 0.0;
+            rack.pushBlockMono(route, mono.data(), 1.0, 1.0, 256);
+            rack.mixBlock(l.data(), r.data(), 256);
+            for (int i = 0; i < 256; ++i) energy += double(l[i]) * double(l[i]);
+        }
+        return energy;
+    };
+
+    const double once = energyAfter(1);
+    const double twice = energyAfter(2);
+    INFO("energy after one acquisition " << once << ", after two " << twice);
+    REQUIRE(once > 0.0);
+    // Identical, not merely similar: the second acquisition should change
+    // nothing whatsoever about the graph.
+    REQUIRE(twice == once);
+}

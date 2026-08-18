@@ -153,7 +153,11 @@ private:
     // that, so the idle threshold is deliberately generous: 4 s of silence at
     // the smallest sensible block.
     static constexpr int kSilentBlocksToIdle = 4 * 48000 / 64;
-    std::atomic<int> silentBlocks_{0};
+
+    // Starts saturated, matching what prepare() and reset() set it to. Zero
+    // here would mean a rack that has never been prepared, let alone rendered
+    // anything, reports itself as ringing -- and RackPool skips ringing racks.
+    std::atomic<int> silentBlocks_{kSilentBlocksToIdle};
 
     // Per-node input buffers for the block interface, sized in prepare().
     std::vector<std::vector<double>> delayInL_, delayInR_;
