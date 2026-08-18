@@ -122,11 +122,33 @@ anything changes and read back on launch. Delete that file to start from default
 
 ### 3. In a DAW
 
-Every build copies the plugin into your system folders, so it is already
-installed:
+Every build copies the plugin into the **per-user** plugin folders:
 
 - VST3: `%LOCALAPPDATA%\Programs\Common\VST3\Seedlathe.vst3`
 - CLAP: `%LOCALAPPDATA%\Programs\Common\CLAP\Seedlathe.clap`
+
+Some hosts do not scan those. Run this once from an **elevated** prompt to
+install alongside every other plugin on the machine instead:
+
+```
+tools\install-plugins.cmd
+```
+
+Re-run it after each rebuild, or replace the copy with a junction so rebuilds
+go live on their own:
+
+```
+mklink /J "C:\Program Files\Common Files\VST3\Seedlathe.vst3" ^
+          "C:\dev\seedlatheuild\out\Seedlathe.vst3"
+```
+
+**If a host still cannot see it**, the usual cause is not the plugin. FL Studio
+records a plugin *class* against every search folder, and a folder added by
+hand through its Plugin Manager is registered as VST2. It then scans that
+folder for VST2 DLLs, sees a directory named `Seedlathe.vst3`, does not
+recognise it, and skips it — silently, with "verify plugins" ticked and
+nothing in the log. The machine-wide folders are already registered with the
+right classes, which is why installing there sidesteps it.
 
 Rescan plugins in your DAW, add Seedlathe to an instrument track, and play.
 It responds to note on/off, velocity, all-notes-off, the sustain pedal (CC 64)
