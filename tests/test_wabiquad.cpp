@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <catch2/catch_approx.hpp>
 #include "webaudio/WaBiquad.h"
 #include <algorithm>
 #include <cmath>
@@ -152,5 +153,61 @@ TEST_CASE("every filter type survives a sweep without producing NaN") {
             INFO("type " << t << " sample " << i);
             REQUIRE(std::isfinite(y));
         }
+    }
+}
+
+TEST_CASE("a shelf with real gain boosts its band and ignores Q") {
+    // Unreachable from the plugin: zyn generates a filterType per oscillator
+    // and then never assigns it, so Voice always builds a lowpass. The shelf
+    // and peaking coefficients exist because this is a port of Blink's
+    // BiquadFilterNode rather than only the parts zyn happens to reach -- and
+    // an untested branch of a port is a branch that quietly rots.
+    //
+    // The existing shelf test uses zero gain, where A is 1 and the response is
+    // flat whatever alpha is. That leaves the alpha expression itself -- which
+    // Blink collapses to 0.5*sin(w0)*sqrt(2) by fixing the slope at S = 1 --
+    // completely uncovered.
+    auto responseAt = [](sl::FilterType type, double gainDb, double q, double hz) {
+        sl::WaBiquad f;
+        f.prepare(48000.0);
+        f.setCoefficients(type, 1000.0, q, gainDb);
+
+        // Drive a sine and measure the settled amplitude.
+        double peak = 0.0;
+        const int n = 24000;
+        for (int i = 0; i < n; ++i) {
+            const double x = std::sin(2.0 * 3.14159265358979323846 * hz * i / 48000.0);
+            const double y = f.process(x);
+            REQUIRE(std::isfinite(y));
+            if (i > n / 2) peak = std::max(peak, std::abs(y));
+        }
+        return peak;
+    };
+
+    // A +12 dB lowshelf lifts 100 Hz and leaves 10 kHz alone.
+    const double lowBoosted = responseAt(sl::FilterType::Lowshelf, 12.0, 1.0, 100.0);
+    const double highUntouched = responseAt(sl::FilterType::Lowshelf, 12.0, 1.0, 10000.0);
+    INFO("lowshelf +12 dB: 100 Hz " << lowBoosted << ", 10 kHz " << highUntouched);
+    REQUIRE(lowBoosted > 3.0);          // about 4x, which is +12 dB
+    REQUIRE(lowBoosted < 4.5);
+    REQUIRE(highUntouched > 0.9);
+    REQUIRE(highUntouched < 1.1);
+
+    // Highshelf is the mirror image.
+    REQUIRE(responseAt(sl::FilterType::Highshelf, 12.0, 1.0, 10000.0) > 3.0);
+    REQUIRE(responseAt(sl::FilterType::Highshelf, 12.0, 1.0, 100.0) < 1.1);
+
+    // At the corner a shelf sits at A, the geometric mean of its two plateaus
+    // -- half the shelf gain in decibels. Derived rather than measured, so it
+    // is not a golden number that drifts with the compiler.
+    const double A = std::pow(10.0, 12.0 / 40.0);
+    REQUIRE(responseAt(sl::FilterType::Lowshelf, 12.0, 1.0, 1000.0)
+            == Catch::Approx(A).epsilon(0.01));
+
+    // And Q does nothing to either, because Blink fixes the slope at S = 1.
+    for (double q : {0.0, 1.0, 20.0, 1000.0}) {
+        INFO("lowshelf at Q " << q);
+        REQUIRE(responseAt(sl::FilterType::Lowshelf, 12.0, q, 100.0)
+                == Catch::Approx(lowBoosted).epsilon(1e-9));
     }
 }

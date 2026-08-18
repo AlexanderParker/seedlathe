@@ -129,6 +129,41 @@ TARGETS = {
                 "        if (block < kMaxBlock) block = std::min(block * kGrowth, kMaxBlock);",
                 "        if (block < kMaxBlock) block = block * kGrowth;"),
         }),
+    "blink": (
+        os.path.join(ROOT, "core", "src", "webaudio", "WaCompressor.cpp"),
+        {
+            "release zone 1 constant": (
+                "constexpr double kReleaseZone1 = 0.09;",
+                "constexpr double kReleaseZone1 = 0.10;"),
+            "release zone 4 constant": (
+                "constexpr double kReleaseZone4 = 0.98;",
+                "constexpr double kReleaseZone4 = 0.95;"),
+            "makeup gain exponent": (
+                "    const double fullRangeMakeupGain = std::pow(1.0 / fullRangeGain, 0.6);",
+                "    const double fullRangeMakeupGain = std::pow(1.0 / fullRangeGain, 0.5);"),
+            # A meaningful digit, not the sixteenth. Perturbing the last few
+            # bits of a coefficient is below any tolerance worth having and
+            # tells you nothing about coverage.
+            "quartic coefficient": (
+                "        const double b = -1.5788320352845888 * y1 + 2.3305837032074286 * y2 -",
+                "        const double b = -1.5700000000000000 * y1 + 2.3305837032074286 * y2 -"),
+        }),
+    "biquad": (
+        os.path.join(ROOT, "core", "src", "webaudio", "WaBiquad.cpp"),
+        {
+            # Expected to survive, and left that way deliberately. Dropping the
+            # sqrt(2) moves the response by about 0.1% -- 1.9952 to 1.9928 at
+            # the corner of a +12 dB shelf -- because alpha sets the transition
+            # shape while the plateaus and the corner are fixed by A. Catching
+            # it would need a four-digit golden number, on coefficients the
+            # plugin never reaches: zyn generates a filterType per oscillator
+            # and never assigns it, so Voice always builds a lowpass. The shelf
+            # coefficients ARE covered for plateau gain and Q independence,
+            # which is what a port of them is for.
+            "shelf alpha loses its sqrt2": (
+                "        const double alpha = 0.5 * std::sin(w0) * std::sqrt(2.0);",
+                "        const double alpha = 0.5 * std::sin(w0);"),
+        }),
     "sharedfxrack": (
         os.path.join(ROOT, "core", "src", "SharedFxRack.cpp"),
         {
