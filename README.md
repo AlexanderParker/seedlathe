@@ -27,6 +27,7 @@ same here as it does on the zyn demo page — enforced by automated tests, not b
 
 - Design: [`docs/superpowers/specs/2026-08-17-seedlathe-vst-design.md`](docs/superpowers/specs/2026-08-17-seedlathe-vst-design.md)
 - Current plan: [`docs/superpowers/plans/2026-08-17-seedlathe-p0-p1-engine.md`](docs/superpowers/plans/2026-08-17-seedlathe-p0-p1-engine.md)
+- Performance baseline: [`docs/performance.md`](docs/performance.md)
 
 ## Layout
 
