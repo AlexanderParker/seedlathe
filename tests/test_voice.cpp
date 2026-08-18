@@ -522,3 +522,128 @@ TEST_CASE("a noise oscillator ignores the pitch envelope") {
     REQUIRE(rmsDiff(renderVoice(plain, rack, 12000),
                     renderVoice(swept, rack, 12000)) == 0.0);
 }
+
+TEST_CASE("each LFO changes the sound, and only when switched on") {
+    // Three LFOs, all reachable from the designer, none previously verified to
+    // do anything at the audio level. The second half of each case matters as
+    // much as the first: a depth set while `on` is false must be inert, or the
+    // switch in the UI is decorative.
+    sl::SharedFxRack rack;
+    rack.prepare(48000.0);
+
+    const sl::Instrument plain = twoSines(1.0, 0.0);
+    rack.prewarm(plain);
+    struct Case { const char* name; double depth; };
+    const Case cases[] = {
+        {"gain",   0.5},        // adds to the gain
+        {"filter", 4000.0},     // hertz of cutoff
+        {"pitch",  2.0},        // multiples of the note frequency
+    };
+
+    for (int which = 0; which < 3; ++which) {
+        auto configure = [&](bool on) {
+            sl::Instrument inst = plain;
+            if (which == 1) {
+                // The filter LFO needs something to filter. Against a sine
+                // through a cutoff already at 20 kHz it moves the output by
+                // 0.0004 RMS -- real, and indistinguishable from nothing. A
+                // sawtooth through a 1 kHz cutoff is what the control is for.
+                inst.oscs[0].waveform = sl::Waveform::Sawtooth;
+                inst.oscs[0].adsrFilter = {0.005, 0.05, 0.005, 0.05,
+                                           0.005, 0.05, 0.05, 0.05};
+            }
+            sl::Lfo& lfo = (which == 0) ? inst.oscs[0].gLfo
+                         : (which == 1) ? inst.oscs[0].fLfo
+                                        : inst.oscs[0].pLfo;
+            lfo.on = on;
+            lfo.type = sl::Waveform::Sine;
+            lfo.frequency = 6.0;
+            lfo.depth = cases[which].depth;
+            return inst;
+        };
+
+        // Both renders share the case's own patch, so the filter case compares
+        // sawtooth-with-LFO against sawtooth-without rather than against the
+        // sine baseline.
+        sl::Instrument off = configure(false);
+        rack.prewarm(off);
+        const auto reference = renderVoice(off, rack, 24000);
+
+        const double active = rmsDiff(reference, renderVoice(configure(true), rack, 24000));
+        const double gated = rmsDiff(reference, renderVoice(off, rack, 24000));
+
+        INFO(cases[which].name << " LFO: on " << active << ", off " << gated);
+        REQUIRE(active > 0.01);
+        REQUIRE(gated == 0.0);
+    }
+}
+
+TEST_CASE("the gain LFO modulates at the rate it was given") {
+    // Not just "something changed": the tremolo has to run at the frequency
+    // asked for. A units slip -- radians for hertz, or per-block for
+    // per-sample -- would pass the test above and be badly wrong here.
+    sl::SharedFxRack rack;
+    rack.prepare(48000.0);
+
+    sl::Instrument inst = twoSines(0.5, 0.0);
+    inst.oscs[0].gLfo.on = true;
+    inst.oscs[0].gLfo.type = sl::Waveform::Sine;
+    inst.oscs[0].gLfo.frequency = 8.0;
+    // Small on purpose. The LFO sums into the gain AudioParam with nothing
+    // clamping it, exactly as zyn's gLFO gain node does, so a large depth
+    // drives the gain negative and the waveform inverts -- which doubles the
+    // apparent rate of an amplitude measurement and has nothing to do with the
+    // LFO's frequency. The scaled envelope peaks near 0.125 here.
+    inst.oscs[0].gLfo.depth = 0.05;
+    rack.prewarm(inst);
+
+    const auto out = renderVoice(inst, rack, 48000);   // one second
+
+    // Amplitude envelope in 5 ms blocks, then count how many times it crosses
+    // its own mean going upward: that is the tremolo rate.
+    constexpr size_t kBlock = 240;
+    std::vector<double> env;
+    for (size_t i = 0; i + kBlock <= out.size(); i += kBlock) {
+        double peak = 0.0;
+        for (size_t j = i; j < i + kBlock; ++j) peak = std::max(peak, double(std::fabs(out[j])));
+        env.push_back(peak);
+    }
+    // Skip the attack, which is not part of the modulation.
+    const size_t from = env.size() / 10;
+    double mean = 0.0;
+    for (size_t i = from; i < env.size(); ++i) mean += env[i];
+    mean /= double(env.size() - from);
+
+    int rising = 0;
+    for (size_t i = from + 1; i < env.size(); ++i)
+        if (env[i - 1] <= mean && env[i] > mean) ++rising;
+
+    INFO("upward crossings in ~0.9 s at 8 Hz: " << rising);
+    REQUIRE(rising >= 6);
+    REQUIRE(rising <= 9);
+}
+
+TEST_CASE("distortion reaches the audio path and is gated by its switch") {
+    // The shaper itself is unit-tested, but nothing checked that a voice
+    // actually routes through it. Distortion was dead code in zyn -- generated
+    // and never applied -- so "the parameter exists but changes nothing" is the
+    // exact failure this has to rule out.
+    sl::SharedFxRack rack;
+    rack.prepare(48000.0);
+
+    const sl::Instrument plain = twoSines(1.0, 0.0);
+    rack.prewarm(plain);
+
+    sl::Instrument driven = plain;
+    driven.oscs[0].dist.on = true;
+    driven.oscs[0].dist.amount = 400.0;
+    driven.oscs[0].dist.oversample = 1;
+
+    sl::Instrument gated = driven;
+    gated.oscs[0].dist.on = false;
+
+    const auto base = renderVoice(plain, rack, 12000);
+    INFO("driven vs clean: " << rmsDiff(base, renderVoice(driven, rack, 12000)));
+    REQUIRE(rmsDiff(base, renderVoice(driven, rack, 12000)) > 0.01);
+    REQUIRE(rmsDiff(base, renderVoice(gated, rack, 12000)) == 0.0);
+}
