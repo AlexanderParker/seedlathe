@@ -87,3 +87,45 @@ TEST_CASE("a snapshot merges offers from several threads without losing any") {
     // The highest score offered by any thread must have survived.
     REQUIRE(e.front().score == double(kThreads * kPer - 1));
 }
+
+TEST_CASE("a snapshot stays sorted and unique while it is being written") {
+    // The existing merge test joins every writer before reading, so it only
+    // proves the end state. The plugin reads this at UI rate WHILE the search
+    // workers are still offering into it, and a reader that caught the list
+    // mid-update would show duplicate seeds or rows out of order.
+    sl::TopSnapshot snap;
+    std::atomic<bool> stop{false};
+    std::atomic<int> reads{0};
+
+    std::vector<std::thread> writers;
+    for (int t = 0; t < 4; ++t) {
+        writers.emplace_back([&snap, &stop, t] {
+            uint32_t rng = 0x9E3779B9u * static_cast<uint32_t>(t + 1);
+            while (!stop.load(std::memory_order_acquire)) {
+                rng = rng * 1664525u + 1013904223u;
+                snap.offer(rng % 5000u, double(rng % 10000u) / 100.0);
+            }
+        });
+    }
+
+    std::thread reader([&snap, &stop, &reads] {
+        while (!stop.load(std::memory_order_acquire)) {
+            const auto v = snap.read();
+            REQUIRE(v.size() <= sl::TopList::kCapacity);
+            for (size_t i = 1; i < v.size(); ++i) {
+                REQUIRE(v[i - 1].score >= v[i].score);
+                for (size_t j = 0; j < i; ++j) REQUIRE(v[j].seed != v[i].seed);
+            }
+            reads.fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    stop.store(true, std::memory_order_release);
+    for (auto& w : writers) w.join();
+    reader.join();
+
+    INFO("reads observed: " << reads.load());
+    REQUIRE(reads.load() > 10);
+    REQUIRE_FALSE(snap.read().empty());
+}

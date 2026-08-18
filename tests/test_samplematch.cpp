@@ -524,3 +524,45 @@ TEST_CASE("the WAV reader survives corrupted files") {
     REQUIRE(accepted > 0);
     REQUIRE(refused > 0);
 }
+
+TEST_CASE("the sample search survives being restarted repeatedly") {
+    // Every restart cancels and joins a whole worker pool, not a single thread.
+    // Getting that wrong leaks threads and lets an old pool publish into the new
+    // search -- and in the plugin the restart is one button click.
+    const auto inst = sl::generateInstrument(2471452471u);
+    const sl::RenderResult r =
+        sl::renderOffline(inst, 0, 1.0, sl::kMatchSeconds, sl::kMatchRate);
+    std::vector<float> mono(r.left.size());
+    for (size_t i = 0; i < mono.size(); ++i) mono[i] = 0.5f * (r.left[i] + r.right[i]);
+
+    sl::SampleSearchRunner runner;
+    runner.setTarget(mono, sl::kMatchRate);
+    REQUIRE(runner.hasTarget());
+
+    for (int i = 0; i < 12; ++i) {
+        runner.start(/*typeFilter*/ 0, /*threshold*/ 0.0);
+        if (i % 2 == 0) std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        runner.cancel();
+
+        // Whatever is published mid-churn has to be coherent on its own terms.
+        const auto top = runner.top();
+        REQUIRE(top.size() <= sl::TopList::kCapacity);
+        for (size_t k = 1; k < top.size(); ++k)
+            REQUIRE(top[k - 1].score >= top[k].score);
+        for (const auto& e : top) {
+            REQUIRE(e.score >= 0.0);
+            REQUIRE(e.score <= 100.0);
+        }
+    }
+
+    for (int i = 0; i < 400 && runner.running(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    REQUIRE_FALSE(runner.running());
+
+    // Replacing the target mid-flight has to cancel and join too, or the old
+    // pool keeps scoring against audio that has been freed.
+    runner.start(0, 0.0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    runner.setTarget(mono, sl::kMatchRate);
+    REQUIRE_FALSE(runner.running());
+}

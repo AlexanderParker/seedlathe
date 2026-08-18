@@ -7,6 +7,9 @@
 #include <cmath>
 #include <fstream>
 #include <string>
+#include <chrono>
+#include <thread>
+#include <vector>
 
 using Catch::Matchers::WithinAbs;
 
@@ -140,4 +143,75 @@ TEST_CASE("starting a new search supersedes a running one") {
     for (int i = 0; i < 200 && runner.running(); ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     REQUIRE_FALSE(runner.running());
+}
+
+TEST_CASE("restarting a search repeatedly leaves no thread behind") {
+    // start() has to cancel and join whatever was running before it spawns
+    // again. Getting that wrong leaks a thread per restart and lets an old
+    // worker publish into the new search's results -- which in the plugin means
+    // clicking Search twice quickly, or letting Find Similar interrupt itself.
+    sl::SeedSearchRunner runner;
+    const auto target = sl::generateInstrument(3703184240u);
+
+    for (int i = 0; i < 40; ++i) {
+        runner.start(target, 0.0);
+        // Sometimes let it get going, sometimes cut it off immediately.
+        if (i % 3 == 0) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        runner.cancel();
+    }
+
+    // Settle, then check the final state is coherent rather than a mixture of
+    // several runs.
+    for (int i = 0; i < 200 && runner.running(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    REQUIRE_FALSE(runner.running());
+
+    const auto best = runner.best();
+    const auto top = runner.top();
+    if (best.found) {
+        REQUIRE(best.score >= 0.0);
+        REQUIRE(best.score <= 100.0);
+    }
+    for (size_t i = 1; i < top.size(); ++i)
+        REQUIRE(top[i - 1].score >= top[i].score);
+}
+
+TEST_CASE("a fresh search reports its own results, not the last one's") {
+    // Every candidate a search considers has the target's type digit as its
+    // last, because the type is fixed by the seed's last digit and searching
+    // across types would waste the effort. So anything reported with the wrong
+    // digit came from a previous run.
+    //
+    // What this does NOT test, having been checked: removing either state reset
+    // in start() leaves it passing. The publish callback overwrites the best
+    // seed, score and top list unconditionally on its first progress report, a
+    // few hundred microseconds in, so a stale value has no window in which to
+    // be seen. Those resets are defensive, not load-bearing.
+    //
+    // What it does test is that a restart cannot leave a previous run's worker
+    // publishing into the new results -- the type digit makes that visible --
+    // which is the failure the join in start() actually prevents.
+    sl::SeedSearchRunner runner;
+
+    runner.start(sl::generateInstrument(3703184240u), 0.0);   // pad, digit 0
+    for (int i = 0; i < 400 && runner.best().score < 90.0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    runner.cancel();
+    for (int i = 0; i < 200 && runner.running(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+    const auto firstBest = runner.best();
+    REQUIRE(firstBest.found);
+    REQUIRE(firstBest.seed % 10u == 0u);
+
+    runner.start(sl::generateInstrument(2360196101u), 0.0);   // bass, digit 1
+    for (int i = 0; i < 200 && !runner.best().found; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    const auto secondBest = runner.best();
+    const auto secondTop = runner.top();
+    runner.cancel();
+
+    REQUIRE(secondBest.found);
+    REQUIRE(secondBest.seed % 10u == 1u);
+    for (const auto& e : secondTop) REQUIRE(e.seed % 10u == 1u);
 }
