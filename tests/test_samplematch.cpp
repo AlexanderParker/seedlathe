@@ -219,6 +219,59 @@ TEST_CASE("a target's own seed ranks first in the factory bank") {
     }
 }
 
+// Noise robustness, locked in. This is the property the whole minimum-statistics
+// noise estimate exists for, and it is easy to lose by accident: averaging the
+// mel bands in decibels rather than in power undoes most of it, and so does
+// dropping the per-band subtraction.
+//
+// Before the estimate went in, the true match at 20 dB SNR -- an ordinary
+// recording, not a bad one -- sat at rank 83 of 115, and scored HIGHER than a
+// clean target because a noisy sample resembles everything a little.
+TEST_CASE("a noisy target still finds its own seed near the top") {
+    const uint32_t seed = 2471452471u;
+    const sl::RenderResult r = sl::renderOffline(sl::generateInstrument(seed), 0, 1.0,
+                                                 sl::kMatchSeconds, sl::kMatchRate);
+    std::vector<float> mono(r.left.size());
+    double peak = 0.0;
+    for (size_t i = 0; i < mono.size(); ++i) {
+        mono[i] = 0.5f * (r.left[i] + r.right[i]);
+        peak = std::max(peak, double(std::fabs(mono[i])));
+    }
+
+    // Deterministic noise at 20 dB below the peak.
+    uint32_t rng = 0xC0FFEEu;
+    const double amp = peak * 0.1;
+    for (float& v : mono) {
+        rng = rng * 1664525u + 1013904223u;
+        v += static_cast<float>(((double(rng) / 4294967296.0) * 2.0 - 1.0) * amp);
+    }
+
+    const sl::SoundFeatures target = sl::featuresOf(mono, sl::kMatchRate);
+    REQUIRE(target.ok);
+
+    std::vector<std::pair<double, uint32_t>> scored;
+    for (int i = 0; i < sl::kNumFactoryPresets; ++i) {
+        const uint32_t candidate = sl::kFactoryPresets[i].seed;
+        scored.push_back({sl::sampleSimilarity(
+            target, sl::featuresOfInstrument(sl::generateInstrument(candidate),
+                                             target.rootNote)), candidate});
+    }
+    std::sort(scored.begin(), scored.end(),
+              [](const auto& a, const auto& b) { return a.first > b.first; });
+
+    int rank = 0;
+    for (size_t i = 0; i < scored.size(); ++i)
+        if (scored[i].second == seed) { rank = static_cast<int>(i) + 1; break; }
+
+    INFO("rank " << rank << "/" << scored.size() << ", top " << scored.front().first);
+    REQUIRE(rank > 0);
+    REQUIRE(rank <= 15);
+
+    // And it must not be CONFIDENT about it. A noisy target scoring as high as
+    // a clean one would mean the score cannot be used as a stopping condition.
+    REQUIRE(scored.front().first < 85.0);
+}
+
 // Diagnostic, not a gate. Run by name:
 //   sl_tests.exe "sample match ranking"
 //

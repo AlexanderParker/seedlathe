@@ -34,33 +34,45 @@ void l2Normalise(std::vector<float>& v) {
     for (float& x : v) x *= inv;
 }
 
-// Mean dB per band across time, then mean-removed. Removing the mean is what
-// makes the comparison about spectral SHAPE rather than overall level, so a
-// quiet recording still matches a loud render of the same timbre.
+// Per-band level across time, with the band's own noise floor subtracted,
+// then mean-removed. Removing the mean is what makes the comparison about
+// spectral SHAPE rather than overall level, so a quiet recording still matches
+// a loud render of the same timbre.
 //
-// This is where the metric's real limit lives, and it is worth stating rather
-// than rediscovering. Broadband noise on the target flattens this profile,
-// while every candidate is a clean render with a strongly shaped one -- so a
-// noisy target ends up closest to whichever candidate is flattest rather than
-// to its own seed. Measured on a lead at 20 dB SNR, which is an ordinary
-// recording, its own seed fell from rank 1 of 115 to rank 86, and the top score
-// went UP, because a noisy target resembles everything a little.
+// The noise estimate is minimum statistics: the tenth percentile of a band's
+// power over time. A band carrying signal is loud in the frames where the note
+// sounds and its low percentile is still signal, so nothing is taken from it.
+// A band carrying only noise is equally loud in every frame, including the
+// silence, so its percentile IS the noise and all of it goes.
 //
-// A floor relative to the peak was tried as a fix and is not one: at 40 dB and
-// 25 dB it changes nothing, and at 15 dB it only lifts that rank to 46 while
-// costing real separation on clean targets. The fix would be to estimate and
-// subtract the noise floor, or to compare only spectral peaks. Until then the
-// feature is for clean material -- rendered stems, sample-library one-shots --
-// and says so in the UI.
+// This is what makes a recorded target usable. Without it the noise floor is
+// averaged in as though it were timbre, the profile flattens, and every clean
+// candidate looks equally unlike it.
+constexpr double kNoisePercentile = 0.10;
+
 std::vector<float> melProfile(const MelSpectrogram& spec) {
     std::vector<float> out(static_cast<size_t>(std::max(spec.bands, 0)), 0.f);
     if (spec.frames <= 0 || spec.bands <= 0) return out;
 
+    // Averaging happens in power, not in dB. Averaging decibels lets a handful
+    // of near-silent frames drag a band down as hard as a loud one lifts it.
+    std::vector<double> power(static_cast<size_t>(spec.frames));
     for (int b = 0; b < spec.bands; ++b) {
+        for (int f = 0; f < spec.frames; ++f)
+            power[static_cast<size_t>(f)] = std::pow(10.0, double(spec.at(f, b)) / 10.0);
+
+        std::vector<double> sorted = power;
+        const size_t k = static_cast<size_t>(kNoisePercentile * double(spec.frames));
+        std::nth_element(sorted.begin(), sorted.begin() + static_cast<ptrdiff_t>(k),
+                         sorted.end());
+        const double noise = sorted[k];
+
         double sum = 0.0;
-        for (int f = 0; f < spec.frames; ++f) sum += spec.at(f, b);
-        out[static_cast<size_t>(b)] = static_cast<float>(sum / spec.frames);
+        for (double p : power) sum += std::max(p - noise, 0.0);
+        out[static_cast<size_t>(b)] = static_cast<float>(
+            10.0 * std::log10(std::max(sum / double(spec.frames), 1e-20)));
     }
+
     const double mean =
         std::accumulate(out.begin(), out.end(), 0.0) / double(out.size());
     for (float& x : out) x -= static_cast<float>(mean);

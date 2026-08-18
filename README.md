@@ -16,9 +16,11 @@ same here as it does on the zyn demo page — enforced by automated tests, not b
 - **Sample match.** Load a recording and search for the seed that sounds most like it.
   Each candidate is rendered offline and compared on timbre, amplitude shape and
   brightness, which runs at hundreds of candidates a second rather than millions.
-  Give it clean material — a rendered stem or a sample-library one-shot. Broadband
-  noise on the target flattens the spectral profile it compares, and a noisy sample
-  matches everything a little rather than one thing well.
+  Each band's own noise floor is estimated and subtracted before comparison, so a
+  recorded sample works and not only a rendered one — at 20 dB SNR the right seed
+  still lands in the top ten of the factory bank. Scores drop as noise rises, which
+  is the honest signal: the match really is looser, so a threshold still means
+  something.
 - **Designer.** Edit any generated instrument directly: five oscillators, draggable
   envelopes, three LFOs, FM, pitch envelope, distortion, per-oscillator delay and
   reverb, and the 5×5 FM matrix. Patches copy and paste as zyn's own JSON.
