@@ -110,6 +110,10 @@ WavData readWavMono(const std::string& path) {
 
     if (!data || dataSize == 0) return fail("no audio data in the file");
     if (channels == 0 || rate == 0) return fail("missing or unreadable format chunk");
+    // Bounded before it reaches the resampler, which scales its output length
+    // by the ratio of the rates.
+    if (double(rate) < kMinWavRate || double(rate) > kMaxWavRate)
+        return fail("implausible sample rate in the file");
     if (format != kFormatPcm && format != kFormatFloat)
         return fail("unsupported WAV encoding (only PCM and IEEE float)");
     if (bits != 8 && bits != 16 && bits != 24 && bits != 32 && bits != 64)
@@ -145,7 +149,16 @@ std::vector<float> resampleLinear(const std::vector<float>& in, double fromRate,
     if (fromRate == toRate) return in;
 
     const double ratio = fromRate / toRate;
-    const size_t n = static_cast<size_t>(static_cast<double>(in.size()) / ratio);
+    const double wanted = static_cast<double>(in.size()) / ratio;
+
+    // Belt and braces alongside the rate check in readWavMono: this is public,
+    // and an extreme ratio asks for an allocation that would fail anyway. An
+    // hour at 768 kHz is about 2.8 billion samples, so the cap is far above
+    // anything real and still finite.
+    constexpr double kMaxOut = 3.0e9;
+    if (!(wanted > 0.0) || wanted > kMaxOut) return {};
+
+    const size_t n = static_cast<size_t>(wanted);
     std::vector<float> out(n);
     for (size_t i = 0; i < n; ++i) {
         const double src = static_cast<double>(i) * ratio;

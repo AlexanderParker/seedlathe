@@ -20,6 +20,13 @@ struct WavData {
 // sub-format tag. Anything else is refused by name rather than half-decoded.
 WavData readWavMono(const std::string& path);
 
+// The range of sample rates a file is allowed to claim. Not fussiness: the
+// rate divides into the resampler's output length, so a file claiming 1 Hz
+// turns one second of audio into a 22050x allocation. 8 kHz to 768 kHz covers
+// everything real, and the bounds here are wider still.
+inline constexpr double kMinWavRate = 1000.0;
+inline constexpr double kMaxWavRate = 768000.0;
+
 // Linear resampling. Good enough for feature extraction -- the mel bands that
 // the sample match compares are far coarser than the interpolation error --
 // and deliberately not used anywhere in the audio path.

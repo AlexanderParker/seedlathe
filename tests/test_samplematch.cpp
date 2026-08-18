@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <fstream>
 #include <filesystem>
 #include <string>
 #include <tuple>
@@ -409,4 +411,116 @@ TEST_CASE("sample match under degradation", "[.diag]") {
                                               sl::kMatchRate / std::pow(2.0, 1.0 / 12.0));
         report("one semitone sharp", sharp, sl::kMatchRate);
     }
+}
+
+namespace {
+
+// A minimal well-formed 16-bit PCM WAV, built in memory so the tests can
+// corrupt it in specific ways.
+std::vector<unsigned char> makeWav(uint32_t rate, uint16_t channels,
+                                   uint16_t bits, uint16_t format,
+                                   size_t frames) {
+    const uint32_t bytesPerSample = bits / 8u;
+    const uint32_t dataBytes = static_cast<uint32_t>(frames) * bytesPerSample * channels;
+    std::vector<unsigned char> b(44 + dataBytes, 0);
+    auto put32 = [&b](size_t at, uint32_t v) {
+        b[at] = v & 0xFF; b[at + 1] = (v >> 8) & 0xFF;
+        b[at + 2] = (v >> 16) & 0xFF; b[at + 3] = (v >> 24) & 0xFF;
+    };
+    auto put16 = [&b](size_t at, uint16_t v) {
+        b[at] = v & 0xFF; b[at + 1] = (v >> 8) & 0xFF;
+    };
+    std::memcpy(&b[0], "RIFF", 4);  put32(4, 36 + dataBytes);
+    std::memcpy(&b[8], "WAVE", 4);
+    std::memcpy(&b[12], "fmt ", 4); put32(16, 16);
+    put16(20, format); put16(22, channels); put32(24, rate);
+    put32(28, rate * bytesPerSample * channels);
+    put16(32, static_cast<uint16_t>(bytesPerSample * channels)); put16(34, bits);
+    std::memcpy(&b[36], "data", 4); put32(40, dataBytes);
+    for (size_t i = 44; i < b.size(); ++i) b[i] = static_cast<unsigned char>(i * 37u);
+    return b;
+}
+
+std::string writeBytes(const char* name, const std::vector<unsigned char>& b) {
+    const std::string path = tempPath(name);
+    std::ofstream f(path, std::ios::binary);
+    f.write(reinterpret_cast<const char*>(b.data()),
+            static_cast<std::streamsize>(b.size()));
+    return path;
+}
+
+} // namespace
+
+TEST_CASE("a WAV claiming an absurd sample rate is refused") {
+    // The rate divides into the resampler's output length, so a file claiming
+    // 1 Hz would turn one second of audio into a 22050x allocation -- gigabytes,
+    // from the Load Sample button, on a file the user did not write.
+    for (uint32_t rate : {1u, 10u, 999u, 2000000u}) {
+        const std::string path =
+            writeBytes("sl_wav_rate.wav", makeWav(rate, 1, 16, 1, 1000));
+        const sl::WavData d = sl::readWavMono(path);
+        INFO("rate " << rate << ": " << d.error);
+        REQUIRE_FALSE(d.ok);
+        std::remove(path.c_str());
+    }
+
+    // And the plausible ones still load.
+    for (uint32_t rate : {8000u, 44100u, 48000u, 192000u}) {
+        const std::string path =
+            writeBytes("sl_wav_rate.wav", makeWav(rate, 1, 16, 1, 1000));
+        const sl::WavData d = sl::readWavMono(path);
+        INFO("rate " << rate << ": " << d.error);
+        REQUIRE(d.ok);
+        REQUIRE(d.sampleRate == double(rate));
+        std::remove(path.c_str());
+    }
+}
+
+TEST_CASE("the WAV reader survives corrupted files") {
+    // Deterministic fuzz. The reader walks a chunk list with sizes taken
+    // straight from the file, so a wrong length is the obvious way to walk off
+    // the end. Every outcome is acceptable except a crash or a lie: either it
+    // refuses the file, or what it returns is internally consistent.
+    const std::vector<unsigned char> good = makeWav(44100, 2, 16, 1, 500);
+
+    uint32_t rng = 0x1234567u;
+    auto next = [&rng] { rng = rng * 1664525u + 1013904223u; return rng; };
+
+    int accepted = 0, refused = 0;
+    for (int iter = 0; iter < 400; ++iter) {
+        std::vector<unsigned char> b = good;
+
+        // Corrupt a handful of bytes, favouring the header where the lengths
+        // and counts live.
+        const int edits = 1 + int(next() % 6);
+        for (int e = 0; e < edits; ++e) {
+            const size_t at = (next() % 4 == 0) ? (next() % b.size())
+                                                : (next() % 44);
+            b[at] = static_cast<unsigned char>(next());
+        }
+        // Sometimes truncate as well.
+        if (next() % 3 == 0 && b.size() > 20)
+            b.resize(20 + next() % (b.size() - 20));
+
+        const std::string path = writeBytes("sl_wav_fuzz.wav", b);
+        const sl::WavData d = sl::readWavMono(path);
+        std::remove(path.c_str());
+
+        if (!d.ok) {
+            REQUIRE_FALSE(d.error.empty());
+            ++refused;
+            continue;
+        }
+        ++accepted;
+        REQUIRE(d.channels > 0);
+        REQUIRE(d.sampleRate >= sl::kMinWavRate);
+        REQUIRE(d.sampleRate <= sl::kMaxWavRate);
+        REQUIRE_FALSE(d.mono.empty());
+        for (float v : d.mono) REQUIRE(std::isfinite(v));
+    }
+
+    // A fuzzer that rejected everything would prove nothing about the decoder.
+    INFO("accepted " << accepted << ", refused " << refused);
+    REQUIRE(accepted > 0);
+    REQUIRE(refused > 0);
 }
