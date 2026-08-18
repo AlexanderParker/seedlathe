@@ -3,18 +3,18 @@
   "rmsMaxDb": 55.0,
   "meanMelMaxDb": 2.75,
   "calibration": {
-    "measuredAt": "re-measured after the sustained-path and MIDI work",
+    "measuredAt": "re-measured at 07d8851",
     "seeds": 60,
     "meanMelDb": 2.36,
-    "worstMelDb": 7.57,
+    "worstMelDb": 7.95,
     "worstRmsDb": 45.01,
     "meanLevelOffsetDb": -0.11,
-    "drift": "Recorded as 2.28 when first calibrated. The current value is 2.36 against a 2.75 gate, so it still passes with margin, but the difference is not attributed: an attempt to bisect it by building an older Voice.cpp failed because that version does not compile against the current tests. Worth chasing if it moves again."
+    "drift": "First calibrated at 2.28. The move to 2.36 is attributable and was recorded in the commits that caused it, just never copied back here: bb11377 took it to 2.38 when the convolver went from double to float with partitioned FFT blocks, and it settled through 2.357 (5750b66) and 2.360 (9c5829d) to 2.363. A deliberate trade for taking the reverb from 11.4x to 100.8x realtime, made with the gate at 2.75 and 0.39 dB of margin left."
   },
   "note": "Two gates with different jobs. The per-seed ceilings are the 100th percentile plus ~20% headroom and catch catastrophic breakage of a single instrument. The mean gate is much tighter and is the sensitive one: a systematic regression moves the mean long before it pushes any single seed past its ceiling. Mean level offset is -0.11 dB, so no residual gain error remains.",
   "knownOutlier": {
     "seed": 1804795437,
-    "melDb": 7.57,
+    "melDb": 7.95,
     "rmsDb": 45.01,
     "detail": "One oscillator with delay and FM, no reverb. Peak level matches Chrome to 0.00 dB, so the instrument is not mis-levelled; the divergence is in the delay tail. Not yet attributed. It is the only seed above 6.1 dB, and the mean is unaffected."
   },

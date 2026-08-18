@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <catch2/catch_approx.hpp>
 #include "webaudio/WaNodes.h"
 #include "sl/Mulberry32.h"
 #include <algorithm>
@@ -191,4 +192,131 @@ TEST_CASE("convolver matches brute-force direct convolution") {
         REQUIRE(peak > 1e-6);
         REQUIRE(worst < peak * 1e-3);
     }
+}
+
+TEST_CASE("a reverb shorter than the direct head does not read past it") {
+    // The convolver splits an impulse into a 64-tap direct head and FFT
+    // segments over the remainder. An impulse shorter than 64 samples has no
+    // remainder, and the head has to be clamped to what exists -- copying a
+    // fixed 64 taps out of a 5-tap buffer is an out-of-bounds read.
+    //
+    // The generator cannot produce this and the designer's slider stops at
+    // 0.05 s, but a pasted patch has neither limit: duration is a double
+    // straight out of the JSON.
+    for (double duration : {1e-6, 1e-5, 1e-4, 0.001}) {
+        sl::WaConvolver verb;
+        verb.prepare(48000.0);
+        verb.buildImpulse(duration, 0.8, 1234u);
+
+        double peak = 0.0;
+        for (int i = 0; i < 4096; ++i) {
+            verb.addInput(i == 0 ? 1.0 : 0.0, i == 0 ? 1.0 : 0.0);
+            verb.advance();
+            REQUIRE(std::isfinite(verb.outL()));
+            REQUIRE(std::isfinite(verb.outR()));
+            peak = std::max(peak, std::abs(verb.outL()));
+        }
+        INFO("duration " << duration << " peak " << peak);
+        REQUIRE(peak < 100.0);        // finite is not enough; it must be sane
+    }
+}
+
+TEST_CASE("a reverb with no energy in it does not blow up the normalisation") {
+    // The impulse is normalised by its own power. A configuration that leaves
+    // essentially no energy would divide by almost nothing and scale the result
+    // to infinity, so the power is floored before the division.
+    for (double decay : {0.0, 1e-9, 60.0}) {
+        sl::WaConvolver verb;
+        verb.prepare(48000.0);
+        verb.buildImpulse(0.5, decay, 99u);
+
+        double peak = 0.0;
+        for (int i = 0; i < 8192; ++i) {
+            verb.addInput(i == 0 ? 1.0 : 0.0, i == 0 ? 1.0 : 0.0);
+            verb.advance();
+            REQUIRE(std::isfinite(verb.outL()));
+            peak = std::max(peak, std::abs(verb.outL()));
+        }
+        INFO("decay " << decay << " peak " << peak);
+        REQUIRE(peak < 100.0);
+    }
+}
+
+TEST_CASE("the reverb normalisation carries its sample-rate term") {
+    // Blink's CalculateNormalizationScale multiplies by
+    // kGainCalibrationSampleRate / sampleRate, and this is a verbatim port of
+    // it. At 48 kHz that factor is exactly 1, so every other test in the suite
+    // would pass with the term deleted -- which is how the mutation audit found
+    // it uncovered.
+    //
+    // Note what is NOT being asserted. The obvious expectation, equal loudness
+    // across rates, is wrong and was the first version of this test: the scale
+    // goes as 1/rate while the sample count goes as rate, so the energy of a
+    // convolved impulse ends up proportional to 48000/rate rather than
+    // constant. That is Blink's behaviour, and the point of a verbatim port is
+    // to reproduce it rather than improve on it.
+    auto tailEnergy = [](double rate) {
+        sl::WaConvolver verb;
+        verb.prepare(rate);
+        verb.buildImpulse(1.0, 0.7, 7u);
+
+        double energy = 0.0;
+        const int frames = static_cast<int>(rate * 2.0);
+        for (int i = 0; i < frames; ++i) {
+            verb.addInput(i == 0 ? 1.0 : 0.0, i == 0 ? 1.0 : 0.0);
+            verb.advance();
+            energy += verb.outL() * verb.outL();
+        }
+        return energy;
+    };
+
+    const double at48 = tailEnergy(48000.0);
+    const double at441 = tailEnergy(44100.0);
+    const double at96 = tailEnergy(96000.0);
+    REQUIRE(at48 > 0.0);
+
+    INFO("energy ratios: 44.1k/48k " << (at441 / at48)
+         << " (expect " << (48000.0 / 44100.0) << "), 96k/48k "
+         << (at96 / at48) << " (expect 0.5)");
+    REQUIRE(at441 / at48 == Catch::Approx(48000.0 / 44100.0).epsilon(0.02));
+    REQUIRE(at96 / at48 == Catch::Approx(0.5).epsilon(0.02));
+}
+
+TEST_CASE("the reverb tail is flushed past the end of the impulse") {
+    // The convolver stops working once the input has been silent for longer
+    // than the impulse -- but not the moment it passes that, because the FFT
+    // delay lines still hold partially accumulated blocks. Cutting at the
+    // impulse length instead throws away the last few thousand samples of every
+    // tail, which is the quietest and most noticeable part to lose.
+    sl::WaConvolver verb;
+    verb.prepare(48000.0);
+    verb.buildImpulse(0.5, 0.8, 4242u);      // 24000 samples of impulse
+
+    constexpr int kIrLen = 24000;
+    constexpr int kPastEnd = 24576;          // three of the largest FFT blocks
+
+    double earlyEnergy = 0.0, lateEnergy = 0.0;
+    int lateNonZero = 0;
+    for (int i = 0; i < kIrLen + kPastEnd; ++i) {
+        verb.addInput(i == 0 ? 1.0 : 0.0, i == 0 ? 1.0 : 0.0);
+        verb.advance();
+        const double y = verb.outL();
+        REQUIRE(std::isfinite(y));
+        if (i < kIrLen) {
+            earlyEnergy += y * y;
+        } else {
+            lateEnergy += y * y;
+            if (y != 0.0) ++lateNonZero;
+        }
+    }
+
+    INFO("energy within the impulse " << earlyEnergy << ", after it " << lateEnergy
+         << " over " << lateNonZero << " non-zero samples");
+    REQUIRE(earlyEnergy > 0.0);
+
+    // Counting samples, not summing energy. A truncated tail still emits the
+    // one sample on which the cut-off triggers, so "energy after the impulse is
+    // above zero" passes against the very bug this is here to catch -- as the
+    // first version of this test did.
+    REQUIRE(lateNonZero > 1000);
 }

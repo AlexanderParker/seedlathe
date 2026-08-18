@@ -97,6 +97,38 @@ TARGETS = {
                 "            (v.currentLevel() == victim->currentLevel() && v.age() < victim->age()))",
                 "            false)"),
         }),
+    "convolver": (
+        os.path.join(ROOT, "core", "src", "webaudio", "WaConvolver.cpp"),
+        {
+            "no output delay compensation": (
+                "        if (cl.outDelay.empty()) {",
+                "        if (true) {"),
+            "silence shortcut fires too early": (
+                "        if (silentSamples_ > irLength_ + 2 * kMaxBlock) { outL_ = 0.0; outR_ = 0.0; return; }",
+                "        if (silentSamples_ > irLength_) { outL_ = 0.0; outR_ = 0.0; return; }"),
+            # Expected to survive: the floor is a divide-by-zero guard, and no
+            # reachable duration or decay -- including 0 and 60 -- drives the
+            # impulse power near it. Defensive, not load-bearing.
+            "impulse power floor removed": (
+                "    if (!std::isfinite(power) || power < kMinPower) power = kMinPower;",
+                "    // MUTANT"),
+            "normalisation ignores sample rate": (
+                "    if (sampleRate > 0.0) scale *= kGainCalibrationSampleRate / sampleRate;",
+                "    // MUTANT"),
+            "direct head not clamped to length": (
+                "    const size_t directLen = std::min(kDirectTaps, length);",
+                "    const size_t directLen = kDirectTaps;"),
+            # Expected to survive, both of these. The tap load is bounds
+            # checked (`src < length ? ir[src] : 0`), so an over-long final
+            # segment or an oversized block only allocates redundant all-zero
+            # partitions. They cost memory and FFT time, not output.
+            "final segment not clamped to length": (
+                "        const size_t end = (block >= kMaxBlock) ? length : std::min(naturalEnd, length);",
+                "        const size_t end = (block >= kMaxBlock) ? length : naturalEnd;"),
+            "block growth uncapped": (
+                "        if (block < kMaxBlock) block = std::min(block * kGrowth, kMaxBlock);",
+                "        if (block < kMaxBlock) block = block * kGrowth;"),
+        }),
     "sharedfxrack": (
         os.path.join(ROOT, "core", "src", "SharedFxRack.cpp"),
         {
