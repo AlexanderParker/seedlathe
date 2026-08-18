@@ -130,7 +130,12 @@ void Voice::noteOn(SharedFxRack* rack, const Instrument& inst, int note,
             s.gLfo.resetPhase();
             s.gLfoDepth = c.gLfo.depth;
         }
-        s.hasFLfo = c.fLfo.on && !s.isNoise;
+        // No noise exclusion, unlike the pitch envelope and pitch LFO below.
+        // zyn guards those two explicitly -- they connect to osc.frequency,
+        // which a BufferSource does not have -- but the filter LFO connects to
+        // nFilt.frequency, and the filter is a separate node that noise passes
+        // through like anything else. Excluding it here was a divergence.
+        s.hasFLfo = c.fLfo.on;
         if (s.hasFLfo) {
             s.fLfo.setType(c.fLfo.type);
             s.fLfo.resetPhase();
@@ -142,6 +147,13 @@ void Voice::noteOn(SharedFxRack* rack, const Instrument& inst, int note,
             s.pLfo.resetPhase();
             s.pLfoDepth = c.pLfo.depth * s.baseFreq;
         }
+        // Diverges from zyn deliberately. zyn has no noise guard here and
+        // connects FM to osc.frequency, which is undefined on a BufferSource --
+        // so a noise oscillator with FM throws a TypeError out of render() and
+        // the note produces nothing at all. Skipping the modulation is the
+        // closest useful behaviour; reproducing the exception is not. No
+        // reference render exists for such a seed either, because the exporter
+        // would have thrown on it too.
         s.hasFm = c.fm.on && !s.isNoise;
         if (s.hasFm) {
             s.fmOsc.setType(c.fm.type);

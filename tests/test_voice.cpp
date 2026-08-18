@@ -647,3 +647,172 @@ TEST_CASE("distortion reaches the audio path and is gated by its switch") {
     REQUIRE(rmsDiff(base, renderVoice(driven, rack, 12000)) > 0.01);
     REQUIRE(rmsDiff(base, renderVoice(gated, rack, 12000)) == 0.0);
 }
+
+TEST_CASE("a noise oscillator does get its filter modulated") {
+    // The generator never produces this combination -- it gates the filter LFO,
+    // pitch LFO and FM behind `nN`, so across 200,000 seeds not one noise
+    // oscillator carries any of them. The designer can, and so can pasted JSON.
+    //
+    // zyn draws the line in a different place. Its generator has the same
+    // exclusion, but its RENDERER only guards the pitch envelope and pitch LFO,
+    // which connect to osc.frequency -- a property a BufferSource does not have.
+    // The filter LFO connects to nFilt.frequency, and the filter is a separate
+    // node that noise passes through like anything else. Excluding it in the
+    // renderer, as this used to, diverged for exactly the patches a user builds
+    // by hand.
+    sl::SharedFxRack rack;
+    rack.prepare(48000.0);
+
+    sl::Instrument plain;
+    plain.oscCount = 1;
+    sl::Osc& o = plain.oscs[0];
+    o.waveform = sl::Waveform::Noise;
+    o.adsrGain = {0.005, 1.0, 0.005, 1.0, 0.005, 1.0, 0.05, 0.0};
+    // A low cutoff, so moving it is audible on broadband noise.
+    o.adsrFilter = {0.005, 0.05, 0.005, 0.05, 0.005, 0.05, 0.05, 0.05};
+    rack.prewarm(plain);
+
+    sl::Instrument swept = plain;
+    swept.oscs[0].fLfo.on = true;
+    swept.oscs[0].fLfo.type = sl::Waveform::Sine;
+    swept.oscs[0].fLfo.frequency = 5.0;
+    swept.oscs[0].fLfo.depth = 3000.0;
+
+    const double moved = rmsDiff(renderVoice(plain, rack, 24000),
+                                 renderVoice(swept, rack, 24000));
+    INFO("filter LFO on noise moved the output by " << moved);
+    REQUIRE(moved > 0.001);
+}
+
+TEST_CASE("a noise oscillator still ignores pitch modulation") {
+    // The other side of the same line, and this one zyn does guard: the pitch
+    // envelope and pitch LFO connect to osc.frequency, which a noise
+    // BufferSource has no equivalent of.
+    sl::SharedFxRack rack;
+    rack.prepare(48000.0);
+
+    sl::Instrument plain;
+    plain.oscCount = 1;
+    plain.oscs[0].waveform = sl::Waveform::Noise;
+    plain.oscs[0].adsrGain = {0.005, 1.0, 0.005, 1.0, 0.005, 1.0, 0.05, 0.0};
+    plain.oscs[0].adsrFilter = {0.005, 1.0, 0.005, 1.0, 0.005, 1.0, 0.05, 1.0};
+    rack.prewarm(plain);
+
+    sl::Instrument bent = plain;
+    bent.oscs[0].pLfo.on = true;
+    bent.oscs[0].pLfo.frequency = 5.0;
+    bent.oscs[0].pLfo.depth = 8.0;
+
+    REQUIRE(rmsDiff(renderVoice(plain, rack, 12000),
+                    renderVoice(bent, rack, 12000)) == 0.0);
+}
+
+TEST_CASE("the FM matrix skips edges touching a noise oscillator") {
+    // Unlike the per-oscillator FM, this one is observable: the matrix taps the
+    // RAW waveform into a history ring, so a noise oscillator makes a perfectly
+    // good modulator unless something stops it. zyn stops it, skipping any edge
+    // whose source or target is noise, and so must this.
+    sl::SharedFxRack rack;
+    rack.prepare(48000.0);
+
+    sl::Instrument inst;
+    inst.oscCount = 2;
+    inst.oscs[0].waveform = sl::Waveform::Sine;      // audible carrier
+    inst.oscs[0].adsrGain = {0.005, 1.0, 0.005, 1.0, 0.005, 1.0, 0.05, 0.0};
+    inst.oscs[0].adsrFilter = {0.005, 1.0, 0.005, 1.0, 0.005, 1.0, 0.05, 1.0};
+    inst.oscs[1].waveform = sl::Waveform::Noise;     // silent, but running
+    inst.oscs[1].adsrGain = {0.005, 0.0, 0.005, 0.0, 0.005, 0.0, 0.05, 0.0};
+    inst.oscs[1].adsrFilter = {0.005, 1.0, 0.005, 1.0, 0.005, 1.0, 0.05, 1.0};
+    rack.prewarm(inst);
+
+    sl::Instrument routed = inst;
+    routed.hasFmMatrix = true;
+    routed.fmMatrix[1][0] = 0.9;      // noise would modulate the sine
+
+    REQUIRE(rmsDiff(renderVoice(inst, rack, 12000),
+                    renderVoice(routed, rack, 12000)) == 0.0);
+
+    // Only the source direction is asserted. The mirror case -- a tonal source
+    // into a NOISE target -- cannot be told apart from here: the noise render
+    // branch never reads the frequency the edge would contribute to, so
+    // dropping that half of the guard changes nothing. Asserting it anyway
+    // would look like coverage and be vacuous.
+}
+
+TEST_CASE("an unset FM matrix delay means one millisecond, not none") {
+    // zyn defaults fmDel to 0.001 with `?? 0.001`, and the generator never
+    // writes the field -- so every generated FM matrix relies on the default.
+    // Losing it would leave a one-sample delay instead of forty-eight, shifting
+    // every modulator's phase. The fidelity test does not notice, being a mel
+    // comparison, so this asserts it directly.
+    sl::SharedFxRack rack;
+    rack.prepare(48000.0);
+
+    sl::Instrument implicit;
+    implicit.oscCount = 2;
+    for (int i = 0; i < 2; ++i) {
+        sl::Osc& o = implicit.oscs[static_cast<size_t>(i)];
+        o.waveform = sl::Waveform::Sine;
+        o.adsrGain = {0.005, 1.0, 0.005, 1.0, 0.005, 1.0, 0.05, 0.0};
+        o.adsrFilter = {0.005, 1.0, 0.005, 1.0, 0.005, 1.0, 0.05, 1.0};
+    }
+    implicit.hasFmMatrix = true;
+    implicit.fmMatrix[1][0] = 0.8;    // fmDelays left at zero throughout
+    rack.prewarm(implicit);
+
+    sl::Instrument explicitDelay = implicit;
+    explicitDelay.fmDelays[1][0] = 0.001;
+
+    REQUIRE(rmsDiff(renderVoice(implicit, rack, 12000),
+                    renderVoice(explicitDelay, rack, 12000)) == 0.0);
+
+    // And a different delay really does sound different, so the comparison
+    // above is not passing because the delay is ignored altogether.
+    sl::Instrument longer = implicit;
+    longer.fmDelays[1][0] = 0.005;
+    REQUIRE(rmsDiff(renderVoice(implicit, rack, 12000),
+                    renderVoice(longer, rack, 12000)) > 0.0);
+}
+
+TEST_CASE("voice stealing takes the oldest of equally quiet voices") {
+    // Level decides first; age breaks the tie. Every voice that has not been
+    // rendered yet reports level zero, so a burst of notes arriving faster than
+    // one block -- a chord, or a dense arpeggio -- lands squarely on that tie.
+    //
+    // Reaching the tie is not enough to test it. With four fresh voices the
+    // oldest also happens to sit in slot 0, which is where the scan starts, so
+    // dropping the age term gives the same answer by accident. One steal first
+    // puts the NEWEST voice in slot 0 and pulls slot order apart from age
+    // order; only then do the two rules disagree.
+    sl::SharedFxRack rack;
+    rack.prepare(48000.0);
+
+    sl::Instrument inst;
+    inst.oscCount = 1;
+    inst.oscs[0].waveform = sl::Waveform::Sine;
+    inst.oscs[0].adsrGain = {0.005, 1.0, 0.005, 1.0, 0.005, 1.0, 0.05, 0.0};
+    inst.oscs[0].adsrFilter = {0.005, 1.0, 0.005, 1.0, 0.005, 1.0, 0.05, 1.0};
+    rack.prewarm(inst);
+
+    sl::VoicePool pool;
+    pool.prepare(48000.0, 4);
+
+    // Slots 0..3 hold notes 0..3, oldest first.
+    for (int n = 0; n < 4; ++n) pool.noteOn(&rack, inst, n, 1.0, true);
+    REQUIRE(pool.activeCount() == 4);
+
+    // Note 4 steals note 0, so slot 0 now holds the newest voice of all.
+    pool.noteOn(&rack, inst, 4, 1.0, true);
+    // Note 5 must now take note 1, the oldest -- not note 4, the first slot.
+    pool.noteOn(&rack, inst, 5, 1.0, true);
+    REQUIRE(pool.activeCount() == 4);
+
+    // Release everything except note 1. A sustained voice runs until released,
+    // so anything still held afterwards is a voice that should have been taken.
+    std::vector<float> l(64), r(64);
+    for (int n : {2, 3, 4, 5}) pool.noteOff(n);
+    for (int b = 0; b < 200; ++b) pool.render(l.data(), r.data(), 64);
+
+    INFO("voices still held: " << pool.activeCount());
+    REQUIRE(pool.activeCount() == 0);
+}

@@ -52,6 +52,51 @@ TARGETS = {
                 "            r->reset();",
                 "            // MUTANT"),
         }),
+    "voice": (
+        os.path.join(ROOT, "core", "src", "Voice.cpp"),
+        {
+            "fm matrix ignores noise sources": (
+                "                if (oscs_[static_cast<size_t>(src)].isNoise) continue;",
+                "                // MUTANT"),
+            # Expected to survive, for the same reason as the three below: a
+            # noise TARGET never reads the frequency an edge would contribute
+            # to. The source half of the same guard is observable and covered.
+            "fm matrix ignores noise targets": (
+                "                if (oscs_[static_cast<size_t>(tgt)].isNoise) continue;",
+                "                // MUTANT"),
+            "no fm delay default": (
+                "                if (d <= 0.0) d = 0.001;   // zyn's default",
+                "                // MUTANT"),
+            "sub-block not bounded by fm delay": (
+                "    for (const auto& e : fmEdges_) subBlock_ = std::min(subBlock_, e.len);",
+                "    // MUTANT"),
+            # These three are EXPECTED to survive. renderOscillator branches on
+            # isNoise before any frequency is computed, so the noise path never
+            # reads hasPitchEnv, hasPLfo or hasFm at all -- the guards restate
+            # zyn's rule at the point the flags are set, and nothing downstream
+            # depends on them. Kept because they document the model, not
+            # because removing them changes a sample.
+            "pitch env applied to noise": (
+                "        s.hasPitchEnv = c.pEnv.on && !s.isNoise;",
+                "        s.hasPitchEnv = c.pEnv.on;"),
+            "pitch lfo applied to noise": (
+                "        s.hasPLfo = c.pLfo.on && !s.isNoise;",
+                "        s.hasPLfo = c.pLfo.on;"),
+            "fm applied to noise": (
+                "        s.hasFm = c.fm.on && !s.isNoise;",
+                "        s.hasFm = c.fm.on;"),
+            # Also expected: an edge with zero gain contributes zero. Skipping
+            # it saves work, it does not change the output.
+            "zero fm amount still routed": (
+                "                if (amt == 0.0) continue;",
+                "                // MUTANT"),
+            "one-shot never ends": (
+                "            if (!sustained_ && t > endTime_) { endsHere = true; valid = i; break; }",
+                "            // MUTANT"),
+            "voice stealing ignores age": (
+                "            (v.currentLevel() == victim->currentLevel() && v.age() < victim->age()))",
+                "            false)"),
+        }),
     "sharedfxrack": (
         os.path.join(ROOT, "core", "src", "SharedFxRack.cpp"),
         {
