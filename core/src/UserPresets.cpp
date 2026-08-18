@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <system_error>
@@ -59,14 +60,42 @@ std::string UserPresetStore::pathFor(const std::string& name) const {
     return (fs::u8path(dir_) / (sanitisePresetName(name) + ".json")).string();
 }
 
+// A preset is a couple of kilobytes: the instrument JSON runs to about 1.7 kB
+// for five oscillators. A megabyte is far beyond anything this writes, and
+// stops a large file that happens to be sitting in the folder from being
+// parsed in full before it is rejected.
+constexpr std::uintmax_t kMaxPresetBytes = 1024 * 1024;
+
+// Long enough for any name worth typing. The value is whatever the file says,
+// so it is bounded before it reaches a list control.
+constexpr size_t kMaxNameChars = 128;
+
 void UserPresetStore::refresh() {
     presets_.clear();
     if (!ready_) return;
 
+    // Every filesystem call here uses its error_code overload, and the
+    // iterator is advanced by hand. The range-for form calls the THROWING
+    // operator++, and directory_iterator(dir, ec) only reports errors from
+    // construction -- so a preset disappearing mid-scan, which another plugin
+    // instance, an antivirus quarantine or a sync client can all cause, throws
+    // filesystem_error out of a function called during plugin construction and
+    // editor layout.
     std::error_code ec;
-    for (const auto& entry : fs::directory_iterator(fs::u8path(dir_), ec)) {
+    fs::directory_iterator it(fs::u8path(dir_), ec);
+    if (ec) return;
+
+    const fs::directory_iterator end;
+    for (; it != end; it.increment(ec)) {
         if (ec) break;
-        if (!entry.is_regular_file() || entry.path().extension() != ".json") continue;
+        const fs::directory_entry& entry = *it;
+
+        std::error_code fileEc;
+        if (!entry.is_regular_file(fileEc) || fileEc) continue;
+        if (entry.path().extension() != ".json") continue;
+
+        const std::uintmax_t size = entry.file_size(fileEc);
+        if (fileEc || size == 0 || size > kMaxPresetBytes) continue;
 
         std::ifstream f(entry.path());
         if (!f) continue;
@@ -75,8 +104,9 @@ void UserPresetStore::refresh() {
         try {
             const nlohmann::json j = nlohmann::json::parse(f);
             p.name = j.value("name", entry.path().stem().string());
+            if (p.name.size() > kMaxNameChars) p.name.resize(kMaxNameChars);
             p.seed = j.value("seed", 0u);
-            p.octave = j.value("octave", 0);
+            p.octave = std::clamp(j.value("octave", 0), -3, 3);
             if (j.contains("instrument") && !j["instrument"].is_null()) {
                 p.instrument = instrumentFromJson(j["instrument"]);
                 p.edited = true;
@@ -86,6 +116,8 @@ void UserPresetStore::refresh() {
             // not take the whole preset list down with it.
             continue;
         }
+        if (p.name.empty()) continue;
+
         p.file = entry.path().string();
         presets_.push_back(std::move(p));
     }

@@ -152,3 +152,68 @@ TEST_CASE("a corrupt preset file hides itself instead of breaking the list") {
     REQUIRE(store.presets().size() == 1);
     REQUIRE(store.presets()[0].name == "Good");
 }
+
+TEST_CASE("the preset scan ignores what is not a preset") {
+    TempDir dir("sl_presets_junk");
+    sl::UserPresetStore store;
+    REQUIRE(store.open(dir.str()));
+
+    sl::UserPreset good;
+    good.name = "Keeper";
+    good.seed = 42u;
+    REQUIRE(store.save(good));
+
+    // A directory whose name ends in .json. is_regular_file has to be what
+    // decides, not the extension -- opening a directory as a file and parsing
+    // it is not something to find out about in front of a user.
+    std::filesystem::create_directory(dir.path / "afolder.json");
+
+    // Empty file, and one far larger than any preset this writes.
+    { std::ofstream f((dir.path / "empty.json").string()); }
+    {
+        std::ofstream f((dir.path / "huge.json").string(), std::ios::binary);
+        const std::string chunk(64 * 1024, 'x');
+        for (int i = 0; i < 24; ++i) f << chunk;    // ~1.5 MB
+    }
+    // Right shape, wrong types.
+    {
+        std::ofstream f((dir.path / "wrongtypes.json").string());
+        f << R"({"name": 12345, "seed": "not a number", "octave": []})";
+    }
+    // Not a preset at all, but valid JSON.
+    {
+        std::ofstream f((dir.path / "other.json").string());
+        f << R"({"unrelated": true})";
+    }
+
+    store.refresh();
+
+    // The valid preset survives; so does the one that is merely missing fields,
+    // since defaults cover it. Nothing else gets through, and nothing throws.
+    bool sawKeeper = false, sawOther = false;
+    for (const auto& p : store.presets()) {
+        if (p.name == "Keeper") sawKeeper = true;
+        if (p.name == "other") sawOther = true;
+        REQUIRE_FALSE(p.name.empty());
+        REQUIRE(p.octave >= -3);
+        REQUIRE(p.octave <= 3);
+    }
+    REQUIRE(sawKeeper);
+    REQUIRE(sawOther);          // defaults to its file name, seed 0
+    REQUIRE(store.presets().size() == 2);
+}
+
+TEST_CASE("an out-of-range octave in a preset file is clamped") {
+    // The value is whatever the file says, and it is handed straight to a
+    // parameter with a -3..3 range.
+    TempDir dir("sl_presets_octave");
+    sl::UserPresetStore store;
+    REQUIRE(store.open(dir.str()));
+    {
+        std::ofstream f((dir.path / "wild.json").string());
+        f << R"({"name": "Wild", "seed": 7, "octave": 9000})";
+    }
+    store.refresh();
+    REQUIRE(store.presets().size() == 1);
+    REQUIRE(store.presets()[0].octave == 3);
+}
