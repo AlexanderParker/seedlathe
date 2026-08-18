@@ -82,6 +82,8 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
                                       "Off", "2x", "4x");
   GetParam(sl::kMultitimbral)->InitBool("Multitimbral", false);
 
+  for (auto& slot : mPendingProgram) slot.store(-1, std::memory_order_relaxed);
+
   // Part 1 always exists, so it is requested from the start. Without this
   // SerializeState skipped it -- it only writes parts that something asked
   // for -- and every designer edit on it was silently dropped from the state
@@ -144,9 +146,13 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
         [this](IControl*) { RollRandomSeed(); }, "Random", style));
     g->AttachControl(new IVButtonControl(
         btns.GetGridCell(1, 1, 3).GetPadded(-3.f),
-        [this](IControl*) {
-          if (mSearch.running()) mSearch.cancel();
-          else mSearch.start(P().livePatch(), 0.0);
+        [this, g](IControl*) {
+          if (mSearch.running()) { mSearch.cancel(); return; }
+          mSearch.start(P().livePatch(), 0.0);
+          // Show the page that reports it, or the button looks like it did
+          // nothing at all.
+          if (auto* t = g->GetControlWithTag(kCtrlTagTabBar))
+            t->As<TabBarControl>()->Select(2);
         }, "Find Similar", style));
     g->AttachControl(new IVButtonControl(
         btns.GetGridCell(2, 1, 3).GetPadded(-3.f),
@@ -182,7 +188,7 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
           static const char* kGroups[] = {"instrument", "presets", "search", "sample", "design"};
           for (int i = 0; i < 5; ++i)
             g->ForControlInGroup(kGroups[i], [i, index](IControl* c) { c->Hide(i != index); });
-        }));
+        }), kCtrlTagTabBar);
 
     // -- Instrument
     g->AttachControl(new ITextControl(page.GetFromTop(20.f), "Loaded instrument",
@@ -685,6 +691,40 @@ void Seedlathe::ServicePending(seedlathe::Part& part)
   part.live.store(1 - live, std::memory_order_release);
   part.racksBuilt = true;
   part.pendingPublish = false;
+}
+
+void Seedlathe::ServicePendingPrograms()
+{
+  for (int i = 0; i < sl::kNumParts; ++i) {
+    const int program =
+        mPendingProgram[static_cast<size_t>(i)].exchange(-1, std::memory_order_acq_rel);
+    if (program < 0 || program >= sl::kNumFactoryPresets) continue;
+    if (!mMulti && i != 0) continue;
+
+    // Deliberately not LoadPreset: that also drives the preset list's own
+    // selection state and lives with the editor, and a program change has to
+    // work whether or not anyone has the window open. The list highlights the
+    // result anyway, because it matches on the seed rather than on a click.
+    // Allocate before setting the seed, not after. EnsurePart seeds a fresh
+    // part from part 1 when it has none, so running it second would overwrite
+    // the seed the program change just asked for.
+    const int was = mEditPart;
+    if (mMulti) {
+      EnsurePart(i);
+      mEditPart = i;
+    }
+
+    const auto& preset = sl::kFactoryPresets[program];
+    SetSeed(preset.seed);
+    GetParam(sl::kOctave)->Set(std::clamp(preset.octave, -3, 3));
+    SendParameterValueFromDelegate(sl::kOctave,
+                                   GetParam(sl::kOctave)->GetNormalized(), true);
+
+    // In multitimbral mode leave the editor on the part the host addressed --
+    // that is where the user needs to be looking. Otherwise put it back.
+    if (!mMulti) mEditPart = was;
+    else SyncDesigner();
+  }
 }
 
 void Seedlathe::ServiceAllPending()
@@ -1352,6 +1392,9 @@ void Seedlathe::OnIdle()
   }
 #endif
 
+  // A program change the audio thread could not act on itself.
+  ServicePendingPrograms();
+
   // A rebuild refused because every rack was still sounding. Retry now that
   // some of them have had time to fall silent.
   ServiceAllPending();
@@ -1438,6 +1481,15 @@ void Seedlathe::ProcessMidiMsg(const IMidiMsg& msg)
            (status == IMidiMsg::kNoteOn && msg.Velocity() == 0))
   {
     part.pool.noteOff(msg.NoteNumber() - kMidiMiddleC + octave * 12);
+  }
+  else if (status == IMidiMsg::kProgramChange)
+  {
+    // Recorded, not acted on: loading a preset moves the seed and rebuilds
+    // racks, and neither belongs on the audio thread.
+    const int program = msg.Program();
+    if (program >= 0 && program < sl::kNumFactoryPresets)
+      mPendingProgram[static_cast<size_t>(index)].store(program,
+                                                        std::memory_order_release);
   }
   else if (status == IMidiMsg::kPitchWheel)
   {

@@ -48,6 +48,7 @@ enum EControlTags
   kCtrlTagPresetStatus,
   kCtrlTagPartStrip,
   kCtrlTagSampleResults,
+  kCtrlTagTabBar,
   kNumCtrlTags
 };
 
@@ -153,6 +154,12 @@ private:
   std::array<seedlathe::Part, sl::kNumParts> mParts;
   int mEditPart = 0;
   bool mMulti = false;
+
+  // A program change arrives on the audio thread but loading a preset moves
+  // the seed and rebuilds racks, which allocates. The audio thread records the
+  // request here and OnIdle applies it; -1 means nothing pending.
+  std::array<std::atomic<int>, sl::kNumParts> mPendingProgram;
+  void ServicePendingPrograms();
 
   seedlathe::Part& P() { return mParts[static_cast<size_t>(mEditPart)]; }
   const seedlathe::Part& P() const { return mParts[static_cast<size_t>(mEditPart)]; }
