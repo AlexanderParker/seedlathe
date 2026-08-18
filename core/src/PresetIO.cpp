@@ -30,12 +30,24 @@ int typeIndexFromName(const std::string& s) {
     throw std::runtime_error("unknown instrument type: " + s);
 }
 
+// One [time, value] entry. at() throws on a missing stage, which is what a
+// corrupt preset deserves, but the INDICES were unchecked: on a const
+// nlohmann::json, reading past the end of an array -- or indexing something
+// that is not an array at all -- is undefined behaviour rather than an
+// exception. A hand-written or clipboard-pasted envelope reaches this.
+double envField(const nlohmann::json& j, const char* stage, size_t i) {
+    const auto& p = j.at(stage);
+    if (!p.is_array() || p.size() <= i || !p[i].is_number())
+        throw std::runtime_error(std::string("bad envelope stage: ") + stage);
+    return p[i].get<double>();
+}
+
 Adsr adsrFromJson(const nlohmann::json& j) {
     Adsr a;
-    a.aT = j.at("A")[0].get<double>(); a.aV = j.at("A")[1].get<double>();
-    a.dT = j.at("D")[0].get<double>(); a.dV = j.at("D")[1].get<double>();
-    a.sT = j.at("S")[0].get<double>(); a.sV = j.at("S")[1].get<double>();
-    a.rT = j.at("R")[0].get<double>(); a.rV = j.at("R")[1].get<double>();
+    a.aT = envField(j, "A", 0); a.aV = envField(j, "A", 1);
+    a.dT = envField(j, "D", 0); a.dV = envField(j, "D", 1);
+    a.sT = envField(j, "S", 0); a.sV = envField(j, "S", 1);
+    a.rT = envField(j, "R", 0); a.rV = envField(j, "R", 1);
     return a;
 }
 
@@ -131,19 +143,32 @@ Instrument instrumentFromJson(const nlohmann::json& j) {
         }
     }
 
-    if (j.contains("fmMatrix") && j["fmMatrix"].is_array()) {
+    // Indexing a CONST nlohmann::json array out of range is undefined
+    // behaviour, not an exception -- so a hand-written or truncated matrix
+    // would read past the end rather than being rejected. This arrives from
+    // the designer's Paste JSON button, which means arbitrary clipboard
+    // content, so the row and column counts are checked rather than assumed.
+    // A short matrix loads what it has: that is friendlier than refusing an
+    // otherwise good patch, and no less safe.
+    const auto readMatrix = [&](const char* key, auto& dest) {
+        if (!j.contains(key) || !j[key].is_array()) return false;
+        const auto& m = j[key];
+        for (int s = 0; s < inst.oscCount && s < static_cast<int>(m.size()); ++s) {
+            const auto& row = m[static_cast<size_t>(s)];
+            if (!row.is_array()) continue;
+            for (int t = 0; t < inst.oscCount && t < static_cast<int>(row.size()); ++t) {
+                const auto& cell = row[static_cast<size_t>(t)];
+                if (cell.is_number())
+                    dest[static_cast<size_t>(s)][static_cast<size_t>(t)] =
+                        cell.get<double>();
+            }
+        }
+        return true;
+    };
+
+    if (readMatrix("fmMatrix", inst.fmMatrix))
         inst.hasFmMatrix = true;
-        for (int s = 0; s < inst.oscCount; ++s)
-            for (int t = 0; t < inst.oscCount; ++t)
-                inst.fmMatrix[static_cast<size_t>(s)][static_cast<size_t>(t)] =
-                    j["fmMatrix"][static_cast<size_t>(s)][static_cast<size_t>(t)].get<double>();
-    }
-    if (j.contains("fmDelays") && j["fmDelays"].is_array()) {
-        for (int s = 0; s < inst.oscCount; ++s)
-            for (int t = 0; t < inst.oscCount; ++t)
-                inst.fmDelays[static_cast<size_t>(s)][static_cast<size_t>(t)] =
-                    j["fmDelays"][static_cast<size_t>(s)][static_cast<size_t>(t)].get<double>();
-    }
+    readMatrix("fmDelays", inst.fmDelays);
     return inst;
 }
 

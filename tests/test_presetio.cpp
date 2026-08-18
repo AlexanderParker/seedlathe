@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include "sl/Instrument.h"
 #include "PresetIO.h"
+#include "sl/InstrumentGen.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <string>
@@ -91,4 +92,69 @@ TEST_CASE("instrumentToJson round-trips every golden vector") {
                     REQUIRE(b.fmMatrix[static_cast<size_t>(s)][static_cast<size_t>(t)] ==
                             a.fmMatrix[static_cast<size_t>(s)][static_cast<size_t>(t)]);
     }
+}
+
+TEST_CASE("a truncated FM matrix loads what it has instead of reading past it") {
+    // Reachable from the designer's Paste JSON button, so the input is whatever
+    // is on the clipboard. Indexing a CONST nlohmann::json array out of range
+    // is undefined behaviour rather than an exception, so this used to read
+    // past the end of a short matrix instead of stopping at it.
+    const auto full = sl::instrumentToJson(sl::generateInstrument(3159763251u));
+
+    nlohmann::json j = full;
+    j["oscs"] = nlohmann::json::array();
+    for (int i = 0; i < 3; ++i) j["oscs"].push_back(full["oscs"][0]);
+    j["fmMatrix"] = nlohmann::json::array({nlohmann::json::array({0.5})});
+
+    const sl::Instrument inst = sl::instrumentFromJson(j);
+    REQUIRE(inst.oscCount == 3);
+    REQUIRE(inst.hasFmMatrix);
+    REQUIRE(inst.fmMatrix[0][0] == 0.5);
+    // Everything the file did not supply stays at zero.
+    REQUIRE(inst.fmMatrix[0][1] == 0.0);
+    REQUIRE(inst.fmMatrix[1][0] == 0.0);
+    REQUIRE(inst.fmMatrix[2][2] == 0.0);
+}
+
+TEST_CASE("a malformed FM matrix does not take the whole patch down") {
+    const auto full = sl::instrumentToJson(sl::generateInstrument(3159763251u));
+
+    nlohmann::json j = full;
+    j["oscs"] = nlohmann::json::array();
+    for (int i = 0; i < 2; ++i) j["oscs"].push_back(full["oscs"][0]);
+    // Rows that are not arrays, and cells that are not numbers.
+    j["fmMatrix"] = nlohmann::json::array({
+        "not a row",
+        nlohmann::json::array({nlohmann::json(), "also not a number"}),
+    });
+
+    const sl::Instrument inst = sl::instrumentFromJson(j);
+    REQUIRE(inst.oscCount == 2);
+    for (int s = 0; s < 2; ++s)
+        for (int t = 0; t < 2; ++t)
+            REQUIRE(inst.fmMatrix[static_cast<size_t>(s)][static_cast<size_t>(t)] == 0.0);
+}
+
+TEST_CASE("a short or mistyped envelope stage is rejected, not read past") {
+    // Same undefined-behaviour class as the FM matrix: j.at("A")[1] on a const
+    // json checks neither the length nor the type. A rejection here is right --
+    // an envelope missing half of a stage is corrupt, not merely terse -- but
+    // it has to be a rejection rather than a read past the end.
+    const auto full = sl::instrumentToJson(sl::generateInstrument(13u));
+
+    auto withGainEnv = [&full](nlohmann::json stageA) {
+        nlohmann::json j = full;
+        j["oscs"][0]["adsrGain"]["A"] = std::move(stageA);
+        return j;
+    };
+
+    REQUIRE_THROWS(sl::instrumentFromJson(withGainEnv(nlohmann::json::array())));
+    REQUIRE_THROWS(sl::instrumentFromJson(withGainEnv(nlohmann::json::array({0.1}))));
+    REQUIRE_THROWS(sl::instrumentFromJson(withGainEnv(nlohmann::json(0.1))));
+    REQUIRE_THROWS(sl::instrumentFromJson(
+        withGainEnv(nlohmann::json::array({0.1, "not a number"}))));
+
+    // And the well-formed one still loads.
+    REQUIRE_NOTHROW(sl::instrumentFromJson(
+        withGainEnv(nlohmann::json::array({0.1, 0.9}))));
 }
