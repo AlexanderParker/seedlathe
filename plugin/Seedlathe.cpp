@@ -1225,9 +1225,13 @@ void Seedlathe::EnsurePart(int index)
   // Allocating a part is the same class of operation as changing the
   // oversampling factor: it hands the audio thread new buffers to walk. Same
   // handshake, for the same reason.
-  Quiesce([this, &part] {
-    part.prepare(GetSampleRate() * mOsFactor, mMulti, GetParam(sl::kVoices)->Int());
-  });
+  if (!Quiesce([this, &part] {
+        part.prepare(GetSampleRate() * mOsFactor, mMulti,
+                     GetParam(sl::kVoices)->Int());
+      })) {
+    // Still requested, so OnIdle comes back to it.
+    return;
+  }
 
   if (!part.hasSeed) {
     // A fresh part starts on the same seed as part 1 rather than on silence,
@@ -1392,6 +1396,14 @@ void Seedlathe::OnIdle()
   }
 #endif
 
+  // Anything the quiescence handshake refused, because the audio thread was
+  // still inside a block when it was asked.
+  if (mPendingReconfigure) Reconfigure();
+  for (int i = 1; i < sl::kNumParts; ++i) {
+    seedlathe::Part& part = mParts[static_cast<size_t>(i)];
+    if (part.requested && !part.allocated) EnsurePart(i);
+  }
+
   // A program change the audio thread could not act on itself.
   ServicePendingPrograms();
 
@@ -1526,13 +1538,9 @@ void Seedlathe::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
 
   const int nChans = NOutChansConnected();
 
-  // Claim the block before reading the reconfigure flag, not after. Half of the
-  // handshake in Quiesce lives here: an odd counter means a block is in flight,
-  // and the message thread waits for it to go even before it touches anything
-  // the render walks.
-  mBlockSeq.fetch_add(1, std::memory_order_acq_rel);
-
-  const bool bail = mReconfiguring.load(std::memory_order_acquire) ||
+  // Half of the handshake lives here; the ordering inside enter() is the other
+  // half. See core/src/Quiescer.h.
+  const bool bail = !mQuiescer.enter() ||
                     static_cast<int>(mLeft.size()) < nFrames * mOsFactor;
 
   if (bail)
@@ -1541,7 +1549,7 @@ void Seedlathe::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
     // than PrepareEngine sized for. Silence beats allocating here.
     for (int c = 0; c < nChans; ++c)
       for (int s = 0; s < nFrames; ++s) outputs[c][s] = 0.;
-    mBlockSeq.fetch_add(1, std::memory_order_release);
+    mQuiescer.leave();
     _mm_setcsr(mxcsr);
     return;
   }
@@ -1600,34 +1608,13 @@ void Seedlathe::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
 
   mScopeSender.ProcessBlock(outputs, nFrames, kCtrlTagScope, 1);
 
-  mBlockSeq.fetch_add(1, std::memory_order_release);
+  mQuiescer.leave();
   _mm_setcsr(mxcsr);
 }
 
-void Seedlathe::Quiesce(const std::function<void()>& work)
+bool Seedlathe::Quiesce(const std::function<void()>& work)
 {
-  // Raising the flag makes every block that starts from now on bail out without
-  // touching the engine; waiting for an even counter then proves no block that
-  // started earlier is still inside one. Only after both is it safe to free and
-  // reallocate what the render walks.
-  //
-  // ProcessBlock claims its block by incrementing the counter BEFORE reading
-  // the flag. Claiming after would leave a window where a block had passed the
-  // check and not yet announced itself.
-  //
-  // If the host is not calling ProcessBlock at all the counter is already even
-  // and this returns at once, which is the same conclusion by a shorter route.
-  mReconfiguring.store(true, std::memory_order_release);
-  for (int i = 0; i < 400; ++i)
-  {
-    if ((mBlockSeq.load(std::memory_order_acquire) & 1) == 0)
-      break;
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
-
-  work();
-
-  mReconfiguring.store(false, std::memory_order_release);
+  return mQuiescer.withQuiescence(work);
 }
 
 void Seedlathe::Reconfigure()
@@ -1639,12 +1626,28 @@ void Seedlathe::Reconfigure()
   const bool wantedMulti = GetParam(sl::kMultitimbral)->Bool();
   const int wantedVoices = GetParam(sl::kVoices)->Int();
   if (wantedOs == mOsFactor && wantedMulti == mMulti &&
-      wantedVoices == mPreparedVoices)
+      wantedVoices == mPreparedVoices) {
+    mPendingReconfigure = false;
     return;
+  }
 
-  mOsFactor = wantedOs;
-  mMulti = wantedMulti;
-  Quiesce([this] { PrepareEngine(); });
+  // The new settings are committed INSIDE the handshake, not before it. They
+  // decide how large the buffers must be, so a refusal after committing them
+  // would leave ProcessBlock comparing the new size against the old buffers
+  // and bailing to silence on every block, permanently.
+  const bool done = Quiesce([this, wantedOs, wantedMulti] {
+    mOsFactor = wantedOs;
+    mMulti = wantedMulti;
+    PrepareEngine();
+  });
+
+  if (!done) {
+    // The audio thread did not leave its block in time. Try again on the next
+    // idle tick rather than reallocating underneath it.
+    mPendingReconfigure = true;
+    return;
+  }
+  mPendingReconfigure = false;
 
   // Every rack was thrown away, so every allocated part needs republishing.
   for (auto& part : mParts)

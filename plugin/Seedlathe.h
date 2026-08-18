@@ -11,6 +11,7 @@
 #include "SeedlathePart.h"
 #include "SampleMatch.h"
 #include "Oversampler.h"
+#include "Quiescer.h"
 #include "UserPresets.h"
 #include "SeedSearch.h"
 #include "sl/Instrument.h"
@@ -89,9 +90,10 @@ private:
   // reallocating under a running audio thread safe.
   void Reconfigure();
 
-  // Runs `work` with the audio thread known not to be inside ProcessBlock.
-  // Everything that reallocates engine buffers goes through here.
-  void Quiesce(const std::function<void()>& work);
+  // Runs `work` with the audio thread known not to be inside ProcessBlock,
+  // and reports whether it got the chance. Everything that reallocates engine
+  // buffers goes through here.
+  bool Quiesce(const std::function<void()>& work);
   void SetSeed(uint32_t seed);
   void RollRandomSeed();
   void RefreshSeedDisplay();
@@ -199,11 +201,14 @@ private:
   // Scratch for one part's render before it is summed into the bus.
   std::vector<float> mPartL, mPartR;
 
-  // The handshake that lets the message thread reallocate the engine. Odd means
-  // a block is in flight; the flag makes new blocks bail out without touching
-  // anything. See Reconfigure.
-  std::atomic<unsigned> mBlockSeq{0};
-  std::atomic<bool> mReconfiguring{false};
+  // The handshake that lets the message thread reallocate the engine. See
+  // core/src/Quiescer.h for why the ordering inside it matters.
+  sl::Quiescer mQuiescer;
+
+  // A reconfiguration the handshake refused, to be retried from OnIdle. It
+  // refuses when the audio thread has not left its block in time, which means
+  // wedged or suspended -- reallocating under it then would crash on resume.
+  bool mPendingReconfigure = false;
   int mPreparedVoices = 0;
   bool mPrepared = false;
 
