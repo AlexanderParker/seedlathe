@@ -180,3 +180,54 @@ TEST_CASE("a reverb tail keeps sounding after the note is released") {
     INFO("tail peak after the voice ended: " << tail);
     REQUIRE(tail > 1e-5);
 }
+
+// The third gate in RackPool::rebuild, and the only one a mutation audit found
+// nothing testing: a rack that has just stopped being live stays off limits
+// until two audio blocks have run.
+//
+// It guards a window that voice ownership cannot see. The audio thread reads
+// liveRack() and then binds a voice to it, and those are not one step. Between
+// them the rack is live to nobody: no voice references it, so rackInUse says
+// free, and it has produced no sound, so ringing says idle. Rebuilding it there
+// reallocates the buffers the note is about to be bound to.
+TEST_CASE("a rack just retired from live is not reused immediately") {
+    // Two racks, so the choice is forced and the answer is unambiguous.
+    sl::RackPool racks;
+    racks.prepare(48000.0, 2);
+    sl::VoicePool pool;
+    pool.prepare(48000.0, 8);
+
+    sl::SharedFxRack* const first = racks.liveRack();
+
+    // Distinct FX so each rebuild has real work to do.
+    REQUIRE(racks.rebuild(sl::generateInstrument(3703184240u), pool));
+    sl::SharedFxRack* const second = racks.liveRack();
+    REQUIRE(second != first);
+
+    // No audio block has run since `first` stopped being live, so the only
+    // remaining candidate is still inside its quiescence window.
+    REQUIRE_FALSE(racks.rebuild(sl::generateInstrument(2360196101u), pool));
+    REQUIRE(racks.liveRack() == second);
+
+    // Two blocks later it is fair game again.
+    std::vector<float> l(64), r(64);
+    for (int b = 0; b < 3; ++b) {
+        racks.audioBlockStarted(pool);
+        pool.render(l.data(), r.data(), 64, racks.all(), racks.allCount());
+    }
+    REQUIRE(racks.rebuild(sl::generateInstrument(2360196101u), pool));
+    REQUIRE(racks.liveRack() == first);
+}
+
+TEST_CASE("a rack that has never been live skips the quiescence wait") {
+    // The exemption matters as much as the wait. Without it the very first
+    // rebuild is refused -- the epoch is still 0 -- and the plugin runs on a
+    // rack nobody prewarmed, with no reverb at all. That shipped once.
+    sl::RackPool racks;
+    racks.prepare(48000.0, 4);
+    sl::VoicePool pool;
+
+    // No audio blocks have run, so the epoch is 0 and every wait would fail.
+    REQUIRE(racks.rebuild(sl::generateInstrument(3703184240u), pool));
+    REQUIRE(racks.liveRack() != nullptr);
+}
