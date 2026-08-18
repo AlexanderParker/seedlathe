@@ -1,6 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <catch2/catch_approx.hpp>
 #include "webaudio/WaOscillator.h"
+#include <atomic>
+#include <thread>
+#include <vector>
 #include <cmath>
 #include <vector>
 
@@ -147,4 +151,146 @@ TEST_CASE("noise source loops and ignores frequency") {
     const double first = w.render();
     for (int i = 0; i < 96000 - 1; ++i) w.render();
     REQUIRE(w.render() == first);
+}
+
+TEST_CASE("the wavetable read wraps cleanly at the end of the table") {
+    // readTable interpolates between index i and i+1, and at the last sample
+    // i+1 has to wrap to 0. Without the mask it reads one float past the end of
+    // the vector -- which does not crash and does not produce a NaN, so nothing
+    // else here would notice. What it does produce is a discontinuity once per
+    // cycle, so continuity is the thing to assert.
+    sl::WaOscillator osc;
+    osc.prepare(48000.0);
+    osc.setType(sl::Waveform::Sine);
+
+    // A frequency that lands on the wrap often, and low enough that a real sine
+    // moves only a little between samples.
+    const double hz = 220.0;
+    double prev = osc.render(hz);
+    double biggestStep = 0.0;
+    for (int i = 0; i < 48000; ++i) {
+        const double y = osc.render(hz);
+        REQUIRE(std::isfinite(y));
+        biggestStep = std::max(biggestStep, std::abs(y - prev));
+        prev = y;
+    }
+
+    // A 220 Hz sine at 48 kHz moves at most about 0.029 per sample. Anything an
+    // order of magnitude beyond that is a read off the end of the table.
+    INFO("largest sample-to-sample step: " << biggestStep);
+    REQUIRE(biggestStep < 0.1);
+}
+
+TEST_CASE("an oscillator stays clean over a long render") {
+    // The phase accumulator is wrapped back into [0, 1) every sample. Letting
+    // it grow instead costs precision immediately and overflows the table index
+    // eventually, but neither shows up in a render of a few thousand samples --
+    // which is what every other oscillator test here does.
+    sl::WaOscillator osc;
+    osc.prepare(48000.0);
+    osc.setType(sl::Waveform::Sine);
+
+    const double hz = 440.0;
+    double peakEarly = 0.0, peakLate = 0.0;
+    double biggestStep = 0.0, prev = osc.render(hz);
+
+    // Thirty seconds. Thirteen million samples is enough for an unwrapped
+    // accumulator to have lost most of its mantissa.
+    const int total = 48000 * 30;
+    for (int i = 0; i < total; ++i) {
+        const double y = osc.render(hz);
+        REQUIRE(std::isfinite(y));
+        biggestStep = std::max(biggestStep, std::abs(y - prev));
+        prev = y;
+        if (i < 48000) peakEarly = std::max(peakEarly, std::abs(y));
+        if (i > total - 48000) peakLate = std::max(peakLate, std::abs(y));
+    }
+
+    INFO("peak early " << peakEarly << ", late " << peakLate
+         << ", largest step " << biggestStep);
+    REQUIRE(peakEarly > 0.9);
+    // Still the same waveform half a minute later, not a decayed or aliased one.
+    REQUIRE(peakLate == Catch::Approx(peakEarly).epsilon(0.02));
+    REQUIRE(biggestStep < 0.1);
+}
+
+TEST_CASE("the top wavetable range is not silent") {
+    // Each range keeps only the partials that fit below Nyquist, and the
+    // highest range can work out to none at all. A floor of one keeps a
+    // fundamental there; without it the top table is all zeros and the
+    // oscillator goes silent at the top of its range rather than thinning out.
+    for (auto type : {sl::Waveform::Sine, sl::Waveform::Sawtooth,
+                      sl::Waveform::Square, sl::Waveform::Triangle}) {
+        sl::WaOscillator osc;
+        osc.prepare(48000.0);
+        osc.setType(type);
+
+        // Well into the top range, but still audible.
+        double peak = 0.0;
+        for (int i = 0; i < 4800; ++i)
+            peak = std::max(peak, std::abs(osc.render(15000.0)));
+
+        INFO("waveform " << static_cast<int>(type) << " peak at 15 kHz: " << peak);
+        REQUIRE(peak > 0.1);
+    }
+}
+
+TEST_CASE("two sample rates can render at once") {
+    // Reported crash: load a sample, start a search, pick a result, play a note
+    // while the search is still running.
+    //
+    // The sample-match search renders every candidate offline at 22.05 kHz on a
+    // worker pool. The audio thread renders at the host rate. Both reach the
+    // same process-wide wavetable and noise caches, which used to hold exactly
+    // one sample rate and rebuild when asked for another -- so each thread
+    // freed the tables the other was reading through. An oscillator holds that
+    // reference for the life of a note, so this is a use-after-free rather than
+    // a torn read, and it crashed rather than sounding wrong.
+    //
+    // A mutex was already there and did not help: it made the rebuild atomic
+    // while leaving the returned reference dangling.
+    std::atomic<bool> stop{false};
+    std::atomic<int> renders{0};
+
+    // Stand-ins for the search pool, at the rate it actually uses.
+    std::vector<std::thread> searchers;
+    for (int t = 0; t < 3; ++t) {
+        searchers.emplace_back([&stop, &renders, t] {
+            while (!stop.load(std::memory_order_acquire)) {
+                sl::WaOscillator osc;
+                osc.prepare(22050.0);
+                osc.setType(static_cast<sl::Waveform>(t % 4));
+                sl::NoiseSource noise;
+                noise.prepare(22050.0);
+                for (int i = 0; i < 512; ++i) {
+                    REQUIRE(std::isfinite(osc.render(330.0)));
+                    REQUIRE(std::isfinite(noise.render()));
+                }
+                renders.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+
+    // The audio thread: one long note at the host rate, holding its reference
+    // across everything the searchers do.
+    sl::WaOscillator voice;
+    voice.prepare(48000.0);
+    voice.setType(sl::Waveform::Sawtooth);
+    sl::NoiseSource voiceNoise;
+    voiceNoise.prepare(48000.0);
+
+    double peak = 0.0;
+    for (int i = 0; i < 48000 * 2; ++i) {
+        const double y = voice.render(220.0);
+        REQUIRE(std::isfinite(y));
+        REQUIRE(std::isfinite(voiceNoise.render()));
+        peak = std::max(peak, std::abs(y));
+    }
+
+    stop.store(true, std::memory_order_release);
+    for (auto& t : searchers) t.join();
+
+    INFO("searcher renders during the note: " << renders.load());
+    REQUIRE(renders.load() > 0);   // the other rate really was in play
+    REQUIRE(peak > 0.5);           // and the note came through intact
 }

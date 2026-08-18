@@ -164,6 +164,37 @@ TARGETS = {
                 "        const double alpha = 0.5 * std::sin(w0) * std::sqrt(2.0);",
                 "        const double alpha = 0.5 * std::sin(w0);"),
         }),
+    "oscillator": (
+        os.path.join(ROOT, "core", "src", "webaudio", "WaOscillator.cpp"),
+        {
+            "no low-range clamp": (
+                "        if (pitchRange <= 0.0) {",
+                "        if (false) {"),
+            "no high-range clamp": (
+                "        } else if (pitchRange >= double(t.ranges - 1)) {",
+                "        } else if (false) {"),
+            "top range not held at the last table": (
+                "        rangeI2_ = rangeI1_ + 1u < t.ranges ? rangeI1_ + 1u : rangeI1_;",
+                "        rangeI2_ = rangeI1_ + 1u;"),
+            "wavetable index not masked": (
+                "    const unsigned i1 = (ip + 1u) & mask;",
+                "    const unsigned i1 = ip + 1u;"),
+            "phase never wrapped": (
+                "    phase_ -= std::floor(phase_);   // handles negative frequencies too",
+                "    // MUTANT"),
+            # Expected to survive: log2(0) is -inf, pitchRange is then -inf,
+            # and the low-range clamp catches it. The ternary is belt and
+            # braces rather than the thing preventing the NaN.
+            "zero frequency not special-cased": (
+                "        const double ratio = absFreq > 0.0 ? absFreq / t.lowestFundamental : 0.5;",
+                "        const double ratio = absFreq / t.lowestFundamental;"),
+            "tables not normalised": (
+                "    if (maxValue > 0.0) {",
+                "    if (false) {"),
+            "partial count floor removed": (
+                "        if (partials < 1) partials = 1;",
+                "        // MUTANT"),
+        }),
     "sharedfxrack": (
         os.path.join(ROOT, "core", "src", "SharedFxRack.cpp"),
         {

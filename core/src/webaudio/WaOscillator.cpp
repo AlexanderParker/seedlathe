@@ -1,6 +1,7 @@
 #include "webaudio/WaOscillator.h"
 #include "sl/Mulberry32.h"
 #include <cmath>
+#include <map>
 #include <mutex>
 
 namespace sl {
@@ -97,21 +98,38 @@ WaveTables buildTables(Waveform w, double sampleRate) {
 }
 
 const WaveTables& tablesFor(Waveform w, double sampleRate) {
-    // Four waveforms x one sample rate in practice. Rebuilt if the host
-    // switches rate, which happens off the audio thread during prepare.
+    // Keyed by sample rate, and never evicted. That is the whole point: an
+    // oscillator holds the returned reference for the life of a note and reads
+    // through it every sample, so an entry can never be freed or moved while
+    // anything might still be looking at it.
+    //
+    // This used to keep one rate and rebuild when asked for another, which was
+    // safe only while the assumption in the old comment held -- that rate
+    // changes happen off the audio thread during prepare. The sample-match
+    // search broke it: its workers render at 22.05 kHz on a thread pool while
+    // the audio thread renders at 48 kHz, so each cleared the cache the other
+    // was reading from. Crash, reported as loading a sample, searching, then
+    // playing a note.
+    //
+    // The mutex was never the missing piece. It made the mutation atomic; what
+    // escaped it was the lifetime of the reference handed back.
+    //
+    // std::map rather than a vector because its nodes are stable: inserting a
+    // new rate cannot move the entries already handed out.
     static std::mutex mtx;
-    static double builtFor = 0.0;
-    static std::vector<WaveTables> cache;
+    static std::map<double, std::vector<WaveTables>> cache;
 
     std::lock_guard<std::mutex> lock(mtx);
-    if (cache.empty() || builtFor != sampleRate) {
-        cache.clear();
+    auto it = cache.find(sampleRate);
+    if (it == cache.end()) {
+        std::vector<WaveTables> built;
+        built.reserve(4);
         for (int i = 0; i < 4; ++i)
-            cache.push_back(buildTables(static_cast<Waveform>(i), sampleRate));
-        builtFor = sampleRate;
+            built.push_back(buildTables(static_cast<Waveform>(i), sampleRate));
+        it = cache.emplace(sampleRate, std::move(built)).first;
     }
     const int idx = static_cast<int>(w);
-    return cache[static_cast<size_t>(idx >= 0 && idx < 4 ? idx : 0)];
+    return it->second[static_cast<size_t>(idx >= 0 && idx < 4 ? idx : 0)];
 }
 
 // size is always a power of two (2048, 4096 or 16384), so the wrap is a mask
@@ -192,12 +210,17 @@ double WaOscillator::render(double freqHz) {
 }
 
 const std::vector<float>& globalNoiseBuffer(double sampleRate) {
+    // Per rate and never evicted, for the same reason as the wavetables above:
+    // NoiseSource keeps the returned reference and reads through it every
+    // sample, so resizing a shared buffer underneath it is a use-after-free the
+    // moment two sample rates are in play at once.
     static std::mutex mtx;
-    static std::vector<float> buffer;
-    static double builtFor = 0.0;
+    static std::map<double, std::vector<float>> buffers;
 
     std::lock_guard<std::mutex> lock(mtx);
-    if (buffer.empty() || builtFor != sampleRate) {
+    auto it = buffers.find(sampleRate);
+    if (it == buffers.end()) {
+        std::vector<float>& buffer = buffers[sampleRate];
         // Fixed seed, not the instrument seed: zyn keeps ONE global noise
         // buffer shared by every voice and instrument, and
         // tools/export-reference-audio.mjs overrides Z.randSample with this
@@ -207,9 +230,9 @@ const std::vector<float>& globalNoiseBuffer(double sampleRate) {
         buffer.resize(n);
         for (size_t i = 0; i < n; ++i)
             buffer[i] = static_cast<float>(r(2.0) - 1.0);
-        builtFor = sampleRate;
+        it = buffers.find(sampleRate);
     }
-    return buffer;
+    return it->second;
 }
 
 void NoiseSource::prepare(double sampleRate) {
