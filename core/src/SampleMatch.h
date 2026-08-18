@@ -45,8 +45,18 @@ struct SoundFeatures {
 SoundFeatures featuresOf(const std::vector<float>& mono, double sampleRate,
                          bool detectPitch = true);
 
-// Features of a seed, rendered offline at `note`.
-SoundFeatures featuresOfInstrument(const Instrument& inst, int note);
+// Features of a seed, rendered so that it SOUNDS at `soundingNote`.
+//
+// Not the note number handed to the renderer: every instrument transposes what
+// it is given by its own oscillator octave and detune, so passing a detected
+// pitch straight through double-counts that. A target whose oscillator sits an
+// octave down would have the whole bank rendered an octave below where it
+// belongs, and score badly against its own seed for no reason but bookkeeping.
+SoundFeatures featuresOfInstrument(const Instrument& inst, int soundingNote);
+
+// How far an instrument transposes the note it is given, in semitones. Taken
+// from the first oscillator, which is what sets the perceived root.
+int instrumentTranspose(const Instrument& inst);
 
 // Fundamental of a signal, as a zyn note number (0 = middle C). Autocorrelation
 // over the loudest window: this only has to be close enough to pick a sensible

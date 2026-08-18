@@ -34,9 +34,24 @@ void l2Normalise(std::vector<float>& v) {
     for (float& x : v) x *= inv;
 }
 
-// Mean RMS per band across time, then mean-removed. Removing the mean is what
+// Mean dB per band across time, then mean-removed. Removing the mean is what
 // makes the comparison about spectral SHAPE rather than overall level, so a
 // quiet recording still matches a loud render of the same timbre.
+//
+// This is where the metric's real limit lives, and it is worth stating rather
+// than rediscovering. Broadband noise on the target flattens this profile,
+// while every candidate is a clean render with a strongly shaped one -- so a
+// noisy target ends up closest to whichever candidate is flattest rather than
+// to its own seed. Measured on a lead at 20 dB SNR, which is an ordinary
+// recording, its own seed fell from rank 1 of 115 to rank 86, and the top score
+// went UP, because a noisy target resembles everything a little.
+//
+// A floor relative to the peak was tried as a fix and is not one: at 40 dB and
+// 25 dB it changes nothing, and at 15 dB it only lifts that rank to 46 while
+// costing real separation on clean targets. The fix would be to estimate and
+// subtract the noise floor, or to compare only spectral peaks. Until then the
+// feature is for clean material -- rendered stems, sample-library one-shots --
+// and says so in the UI.
 std::vector<float> melProfile(const MelSpectrogram& spec) {
     std::vector<float> out(static_cast<size_t>(std::max(spec.bands, 0)), 0.f);
     if (spec.frames <= 0 || spec.bands <= 0) return out;
@@ -132,16 +147,23 @@ int detectRootNote(const std::vector<float>& mono, double sampleRate) {
     const size_t maxLag = std::min(n - 1, static_cast<size_t>(sampleRate / 27.0));
     if (maxLag <= minLag) return 0;
 
+    // Zero-lag energy once, over the whole window.
+    double e0 = 0.0;
+    for (size_t i = 0; i < n; ++i) e0 += double(w[i]) * double(w[i]);
+    if (e0 <= 1e-12) return 0;
+
+    // The BIASED estimator: the sum runs over the shrinking overlap but the
+    // divisor stays the full-window energy, so correlation tapers with lag.
+    // Normalising by the overlap instead -- which looks more correct -- makes a
+    // two-sample overlap correlate perfectly, and the answer is then always the
+    // longest lag on offer. That is not a subtlety to rediscover: it returned
+    // -36 semitones, the clamp floor, for a pure middle C.
     double bestScore = 0.0;
     size_t bestLag = 0;
     for (size_t lag = minLag; lag <= maxLag; ++lag) {
-        double num = 0.0, energy = 0.0;
-        for (size_t i = 0; i + lag < n; ++i) {
-            num += double(w[i]) * double(w[i + lag]);
-            energy += double(w[i + lag]) * double(w[i + lag]);
-        }
-        // Normalised, so long lags are not favoured simply for summing more.
-        const double score = energy > 1e-12 ? num / std::sqrt(energy) : 0.0;
+        double num = 0.0;
+        for (size_t i = 0; i + lag < n; ++i) num += double(w[i]) * double(w[i + lag]);
+        const double score = num / e0;
         if (score > bestScore) { bestScore = score; bestLag = lag; }
     }
     if (bestLag == 0) return 0;
@@ -179,7 +201,14 @@ SoundFeatures featuresOf(const std::vector<float>& mono, double sampleRate,
     return f;
 }
 
-SoundFeatures featuresOfInstrument(const Instrument& inst, int note) {
+int instrumentTranspose(const Instrument& inst) {
+    if (inst.oscCount <= 0) return 0;
+    const Osc& o = inst.oscs[0];
+    return o.oct * 12 + static_cast<int>(o.detune);
+}
+
+SoundFeatures featuresOfInstrument(const Instrument& inst, int soundingNote) {
+    const int note = soundingNote - instrumentTranspose(inst);
     const RenderResult r = renderOffline(inst, note, 1.0, kMatchSeconds, kMatchRate);
     if (r.left.empty()) return {};
 

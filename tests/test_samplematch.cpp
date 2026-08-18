@@ -4,12 +4,16 @@
 #include "OfflineRender.h"
 #include "SampleMatch.h"
 #include "WavIO.h"
+#include "sl/FactoryPresets.h"
 #include "sl/InstrumentGen.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -175,4 +179,181 @@ TEST_CASE("the sample search runner cancels promptly and keeps its best") {
     REQUIRE(mid.score > 0.0);
     // Cancelling keeps the best rather than discarding it.
     REQUIRE(runner.best().score >= mid.score);
+}
+
+// The gate the metric actually has to pass. Reflexivity -- a sound matching
+// itself -- proves nothing; what matters is whether the target's own seed comes
+// FIRST out of the whole factory bank, and by enough to mean something.
+//
+// Two targets rather than the diagnostic's five, because each one renders the
+// entire bank and the suite should not take a minute to say the same thing.
+TEST_CASE("a target's own seed ranks first in the factory bank") {
+    for (uint32_t seed : {3703184240u /*pad*/, 2360196101u /*bass*/}) {
+        const sl::SoundFeatures target =
+            sl::featuresOfInstrument(sl::generateInstrument(seed), 0);
+        REQUIRE(target.ok);
+
+        std::vector<std::pair<double, uint32_t>> scored;
+        for (int i = 0; i < sl::kNumFactoryPresets; ++i) {
+            const uint32_t candidate = sl::kFactoryPresets[i].seed;
+            scored.push_back({sl::sampleSimilarity(
+                target, sl::featuresOfInstrument(sl::generateInstrument(candidate),
+                                                 target.rootNote)), candidate});
+        }
+        std::sort(scored.begin(), scored.end(),
+                  [](const auto& a, const auto& b) { return a.first > b.first; });
+
+        double sum = 0.0;
+        for (const auto& e : scored) sum += e.first;
+        const double mean = sum / double(scored.size());
+
+        INFO("seed " << seed << ": top " << scored.front().second
+             << " at " << scored.front().first << ", runner-up "
+             << scored[1].first << ", mean " << mean);
+
+        REQUIRE(scored.front().second == seed);
+        // And by a margin. A metric that put everything within a point of
+        // everything else would pass the rank check while being useless.
+        REQUIRE(scored.front().first - scored[1].first > 5.0);
+        REQUIRE(scored.front().first - mean > 30.0);
+    }
+}
+
+// Diagnostic, not a gate. Run by name:
+//   sl_tests.exe "sample match ranking"
+//
+// The similarity metric has only ever been checked against renders of itself,
+// which proves it is reflexive and nothing more. The question that matters is
+// whether it RANKS: given a target, does its own instrument come first out of
+// the whole factory bank, and by how much does it beat the rest? A metric that
+// scores everything 85-95% would make the search look busy while returning
+// noise, and would make the "search until 85%" threshold meaningless.
+TEST_CASE("sample match ranking", "[.diag]") {
+    // Spread across instrument types rather than the first N, so a metric that
+    // only works on sustained tones is caught.
+    const uint32_t targets[] = {
+        3703184240u,   // pad
+        2471452471u,   // lead
+        2360196101u,   // bass
+        1455000701u,   // lead
+        185045751u,    // lead
+    };
+
+    // Score every factory preset once per target.
+    std::vector<sl::SoundFeatures> bank;
+    bank.reserve(static_cast<size_t>(sl::kNumFactoryPresets));
+
+    for (uint32_t seed : targets) {
+        const sl::SoundFeatures target =
+            sl::featuresOfInstrument(sl::generateInstrument(seed), 0);
+        REQUIRE(target.ok);
+
+        std::vector<std::pair<double, uint32_t>> scored;
+        for (int i = 0; i < sl::kNumFactoryPresets; ++i) {
+            const uint32_t candidate = sl::kFactoryPresets[i].seed;
+            const double score = sl::sampleSimilarity(
+                target, sl::featuresOfInstrument(sl::generateInstrument(candidate), 0));
+            scored.push_back({score, candidate});
+        }
+        std::sort(scored.begin(), scored.end(),
+                  [](const auto& a, const auto& b) { return a.first > b.first; });
+
+        int rank = 0;
+        for (size_t i = 0; i < scored.size(); ++i)
+            if (scored[i].second == seed) { rank = static_cast<int>(i) + 1; break; }
+
+        double sum = 0.0;
+        for (const auto& s : scored) sum += s.first;
+
+        WARN("target " << seed << ": own rank " << rank << "/" << scored.size()
+             << ", self " << scored.front().first
+             << ", runner-up " << scored[1].first
+             << ", median " << scored[scored.size() / 2].first
+             << ", worst " << scored.back().first
+             << ", mean " << (sum / double(scored.size())));
+    }
+}
+
+// Diagnostic. Run by name:
+//   sl_tests.exe "sample match under degradation"
+//
+// Ranking a clean render against the bank proves the metric discriminates
+// between seeds. It says nothing about a real recording, which arrives with
+// noise, a room on it, a dull microphone and a pitch nobody agreed on. This
+// degrades a known target four ways and asks whether its own seed still comes
+// first -- if a little noise sinks it, the feature is decorative.
+TEST_CASE("sample match under degradation", "[.diag]") {
+    const uint32_t seed = 2471452471u;   // lead
+    const sl::RenderResult r = sl::renderOffline(sl::generateInstrument(seed), 0, 1.0,
+                                                 sl::kMatchSeconds, sl::kMatchRate);
+    std::vector<float> clean(r.left.size());
+    for (size_t i = 0; i < clean.size(); ++i) clean[i] = 0.5f * (r.left[i] + r.right[i]);
+
+    double peak = 0.0;
+    for (float v : clean) peak = std::max(peak, double(std::fabs(v)));
+
+    // Deterministic noise, so the numbers are comparable run to run.
+    uint32_t rng = 0xC0FFEEu;
+    auto noise = [&rng] {
+        rng = rng * 1664525u + 1013904223u;
+        return (double(rng) / 4294967296.0) * 2.0 - 1.0;
+    };
+
+    auto rankOf = [&](const std::vector<float>& signal, double rate) {
+        const sl::SoundFeatures target = sl::featuresOf(signal, rate);
+        std::vector<std::pair<double, uint32_t>> scored;
+        for (int i = 0; i < sl::kNumFactoryPresets; ++i) {
+            const uint32_t candidate = sl::kFactoryPresets[i].seed;
+            scored.push_back({sl::sampleSimilarity(
+                target, sl::featuresOfInstrument(sl::generateInstrument(candidate),
+                                                 target.rootNote)), candidate});
+        }
+        std::sort(scored.begin(), scored.end(),
+                  [](const auto& a, const auto& b) { return a.first > b.first; });
+        int rank = 0;
+        for (size_t i = 0; i < scored.size(); ++i)
+            if (scored[i].second == seed) { rank = static_cast<int>(i) + 1; break; }
+        return std::make_tuple(rank, scored.front().first, scored[1].first,
+                               target.rootNote);
+    };
+
+    auto report = [&](const char* what, const std::vector<float>& s, double rate) {
+        const auto [rank, top, second, root] = rankOf(s, rate);
+        WARN(what << ": own rank " << rank << "/" << sl::kNumFactoryPresets
+             << ", top score " << top << ", second " << second
+             << ", detected root " << root);
+    };
+
+    report("clean", clean, sl::kMatchRate);
+
+    for (double snrDb : {20.0, 10.0}) {
+        const double amp = peak * std::pow(10.0, -snrDb / 20.0);
+        std::vector<float> noisy(clean.size());
+        for (size_t i = 0; i < clean.size(); ++i)
+            noisy[i] = clean[i] + static_cast<float>(noise() * amp);
+        char label[48];
+        std::snprintf(label, sizeof(label), "white noise at %.0f dB SNR", snrDb);
+        report(label, noisy, sl::kMatchRate);
+    }
+
+    {
+        // One-pole at 4 kHz: a dull microphone, or a source across a room.
+        std::vector<float> dull(clean.size());
+        const double a = std::exp(-2.0 * 3.14159265358979323846 * 4000.0 / sl::kMatchRate);
+        double z = 0.0;
+        for (size_t i = 0; i < clean.size(); ++i) {
+            z = double(clean[i]) * (1.0 - a) + z * a;
+            dull[i] = static_cast<float>(z);
+        }
+        report("lowpassed at 4 kHz", dull, sl::kMatchRate);
+    }
+
+    {
+        // A semitone sharp, by resampling. Tests whether the pitch detection
+        // is load-bearing: without it the mel profile shifts and every band
+        // lands somewhere else.
+        const auto sharp = sl::resampleLinear(clean, sl::kMatchRate,
+                                              sl::kMatchRate / std::pow(2.0, 1.0 / 12.0));
+        report("one semitone sharp", sharp, sl::kMatchRate);
+    }
 }
