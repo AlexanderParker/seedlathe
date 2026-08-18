@@ -350,3 +350,175 @@ TEST_CASE("a note started while bent is already in tune with the bend") {
     for (size_t i = 0; i < a.size(); ++i)
         REQUIRE(std::fabs(a[i] - b[i]) < 1e-6f);
 }
+
+namespace {
+
+// A plain two-oscillator instrument for the modulation tests: sine carriers,
+// flat envelopes, no filter movement, no effects. Anything that shows up in the
+// output is the thing under test and not an artefact of the patch.
+sl::Instrument twoSines(double gain0, double gain1) {
+    sl::Instrument inst;
+    inst.oscCount = 2;
+    for (int i = 0; i < 2; ++i) {
+        sl::Osc& o = inst.oscs[static_cast<size_t>(i)];
+        const double g = (i == 0) ? gain0 : gain1;
+        o.waveform = sl::Waveform::Sine;
+        o.adsrGain = {0.005, g, 0.005, g, 0.005, g, 0.05, 0.0};
+        o.adsrFilter = {0.005, 1.0, 0.005, 1.0, 0.005, 1.0, 0.05, 1.0};
+    }
+    return inst;
+}
+
+std::vector<float> renderVoice(const sl::Instrument& inst, sl::SharedFxRack& rack,
+                               int frames) {
+    sl::VoicePool pool;
+    pool.prepare(48000.0, 4);
+    pool.noteOn(&rack, inst, 0, 1.0, true);
+    std::vector<float> l(static_cast<size_t>(frames)), r(static_cast<size_t>(frames));
+    pool.render(l.data(), r.data(), frames);
+    return l;
+}
+
+double rmsDiff(const std::vector<float>& a, const std::vector<float>& b) {
+    const size_t n = std::min(a.size(), b.size());
+    double sum = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        const double d = double(a[i]) - double(b[i]);
+        sum += d * d;
+    }
+    return std::sqrt(sum / double(n));
+}
+
+} // namespace
+
+TEST_CASE("the FM matrix actually modulates, and only when switched on") {
+    sl::SharedFxRack rack;
+    rack.prepare(48000.0);
+
+    const sl::Instrument plain = twoSines(1.0, 1.0);
+    rack.prewarm(plain);
+
+    sl::Instrument routed = plain;
+    routed.hasFmMatrix = true;
+    routed.fmMatrix[1][0] = 0.8;      // osc 1 modulates osc 0
+
+    // Same matrix values, switch off: nothing should reach the audio.
+    sl::Instrument gated = routed;
+    gated.hasFmMatrix = false;
+
+    const auto base = renderVoice(plain, rack, 12000);
+    const auto withFm = renderVoice(routed, rack, 12000);
+    const auto offAgain = renderVoice(gated, rack, 12000);
+
+    INFO("modulated vs plain: " << rmsDiff(base, withFm));
+    REQUIRE(rmsDiff(base, withFm) > 0.01);      // it does something
+    REQUIRE(rmsDiff(base, offAgain) == 0.0);    // and nothing when off
+}
+
+TEST_CASE("a zero FM matrix entry is the same as no entry at all") {
+    sl::SharedFxRack rack;
+    rack.prepare(48000.0);
+    const sl::Instrument plain = twoSines(1.0, 1.0);
+    rack.prewarm(plain);
+
+    sl::Instrument zeroed = plain;
+    zeroed.hasFmMatrix = true;      // every amount still 0
+
+    REQUIRE(rmsDiff(renderVoice(plain, rack, 8000),
+                    renderVoice(zeroed, rack, 8000)) == 0.0);
+}
+
+TEST_CASE("the FM matrix routes source to target, not the reverse") {
+    // Transposing the two indices is a one-character bug that every other test
+    // here would pass, because both directions modulate *something*. This
+    // separates them: oscillator 1 is silent in the output but still runs as an
+    // oscillator, since the matrix taps the raw waveform ahead of the gain
+    // envelope -- which is what zyn does, connecting FM to osc.frequency rather
+    // than through the gain node.
+    sl::SharedFxRack rack;
+    rack.prepare(48000.0);
+
+    const sl::Instrument plain = twoSines(1.0, 0.0);   // osc 1 inaudible
+    rack.prewarm(plain);
+
+    sl::Instrument intoAudible = plain;
+    intoAudible.hasFmMatrix = true;
+    intoAudible.fmMatrix[1][0] = 0.8;    // silent osc modulates the audible one
+
+    sl::Instrument intoSilent = plain;
+    intoSilent.hasFmMatrix = true;
+    intoSilent.fmMatrix[0][1] = 0.8;     // audible osc modulates the silent one
+
+    const auto base = renderVoice(plain, rack, 12000);
+    const auto audible = rmsDiff(base, renderVoice(intoAudible, rack, 12000));
+    const auto silent = rmsDiff(base, renderVoice(intoSilent, rack, 12000));
+
+    INFO("into the audible oscillator: " << audible
+         << ", into the silent one: " << silent);
+    REQUIRE(audible > 0.01);
+    REQUIRE(silent == 0.0);
+}
+
+TEST_CASE("the pitch envelope sweeps the oscillator up from zero") {
+    // zyn's quirk, and the reason this needs pinning: the pitch envelope
+    // REPLACES the oscillator frequency rather than offsetting it. Z.adsr
+    // schedules setValueAtTime(0) and then ramps to oFreq * amount, so a note
+    // with a pitch envelope starts at 0 Hz and sweeps up. Anyone "fixing" that
+    // to an offset would change the sound of every seed that uses one.
+    sl::SharedFxRack rack;
+    rack.prepare(48000.0);
+
+    sl::Instrument inst;
+    inst.oscCount = 1;
+    sl::Osc& o = inst.oscs[0];
+    o.waveform = sl::Waveform::Sine;
+    o.adsrGain = {0.002, 1.0, 0.002, 1.0, 0.002, 1.0, 0.05, 0.0};
+    o.adsrFilter = {0.002, 1.0, 0.002, 1.0, 0.002, 1.0, 0.05, 1.0};
+    o.pEnv.on = true;
+    o.pEnv.amount = 1.0;                                  // ends at the note pitch
+    o.pEnv.env = {0.25, 1.0, 0.05, 1.0, 0.05, 1.0, 0.05, 1.0};   // 250 ms sweep up
+    rack.prewarm(inst);
+
+    const auto out = renderVoice(inst, rack, 24000);      // half a second
+
+    auto crossings = [&out](size_t from, size_t to) {
+        int n = 0;
+        for (size_t i = from; i + 1 < to && i + 1 < out.size(); ++i)
+            if ((out[i] < 0.f) != (out[i + 1] < 0.f)) ++n;
+        return n;
+    };
+
+    // First 50 ms: still climbing out of 0 Hz, so barely any cycles.
+    const int early = crossings(0, 2400);
+    // 300-350 ms: the ramp has finished and it sits at middle C, 261.6 Hz,
+    // which is about 26 crossings in 50 ms.
+    const int late = crossings(14400, 16800);
+
+    INFO("crossings early " << early << ", late " << late);
+    REQUIRE(early < 8);
+    REQUIRE(late > 20);
+    REQUIRE(late < 32);
+}
+
+TEST_CASE("a noise oscillator ignores the pitch envelope") {
+    // Noise has no frequency to sweep, and zyn's render skips the pENV branch
+    // for it entirely. Applying one anyway would be silent here but would
+    // diverge the moment the envelope was given a different shape.
+    sl::SharedFxRack rack;
+    rack.prepare(48000.0);
+
+    sl::Instrument plain;
+    plain.oscCount = 1;
+    plain.oscs[0].waveform = sl::Waveform::Noise;
+    plain.oscs[0].adsrGain = {0.002, 1.0, 0.002, 1.0, 0.002, 1.0, 0.05, 0.0};
+    plain.oscs[0].adsrFilter = {0.002, 1.0, 0.002, 1.0, 0.002, 1.0, 0.05, 1.0};
+    rack.prewarm(plain);
+
+    sl::Instrument swept = plain;
+    swept.oscs[0].pEnv.on = true;
+    swept.oscs[0].pEnv.amount = 4.0;
+    swept.oscs[0].pEnv.env = {0.2, 1.0, 0.05, 1.0, 0.05, 1.0, 0.05, 1.0};
+
+    REQUIRE(rmsDiff(renderVoice(plain, rack, 12000),
+                    renderVoice(swept, rack, 12000)) == 0.0);
+}
