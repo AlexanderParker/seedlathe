@@ -46,10 +46,8 @@ Patches copy and paste as JSON if you want to keep one outside the plugin.
 
 ## Playing
 
-**Cutoff** and **Resonance** in the header affect notes that are already
-sounding. Everything else about a seed is fixed when a note starts, so those
-two are the only real-time controls. Both are host parameters and can be
-automated.
+Volume, octave, cutoff and resonance sit in the header. All four are host
+parameters, so they automate.
 
 The plugin responds to velocity, sustain (CC 64), pitch bend and program
 change. **Multitimbral** in Settings gives each MIDI channel its own
