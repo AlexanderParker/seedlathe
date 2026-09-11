@@ -154,7 +154,7 @@ go live on their own:
 
 ```
 mklink /J "C:\Program Files\Common Files\VST3\Seedlathe.vst3" ^
-          "C:\dev\seedlatheuild\out\Seedlathe.vst3"
+          "<repo>\build\out\Seedlathe.vst3"
 ```
 
 **If a host still cannot see it**, the usual cause is not the plugin. FL Studio
