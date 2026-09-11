@@ -26,7 +26,12 @@ because the exact match is usually less interesting than the near misses.
 Each candidate is rendered and compared on timbre, attack and brightness, so
 it works on a recording and not only on something the synth made.
 
-**Presets**: 115 factory sounds, plus your own.
+**Presets**: 115 factory sounds, plus your own. Presets live in packs, each
+with categories, and the browser filters by both. A pack is one JSON file, so
+sharing a set of sounds is sending one attachment — import it from the
+Presets tab, or drop it in the presets folder and hit Rescan. A preset stores
+volume, octave, cutoff and resonance alongside the seed, so it loads at the
+level it was voiced at.
 
 **Back** and **Next** step through everything you have loaded this session, so
 a sound you passed over is one click away rather than gone.
