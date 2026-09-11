@@ -81,6 +81,12 @@ public:
   void OnParamChange(int paramIdx) override;
   void OnIdle() override;
 
+  // Closing the editor is the strongest form of "I have moved on": with no
+  // window there is no Search tab to be open, and nothing to watch a result
+  // arrive on. A search left running would hold a core for a window nobody
+  // can see.
+  void OnUIClose() override;
+
   // The designer edits an instrument, not a parameter list, so the edit has to
   // travel in the state chunk. Params still carry the seed -- they are the
   // authoritative source for it -- and the chunk carries only the deviation
@@ -135,6 +141,15 @@ private:
 
   // Starts a similarity search and arms adoption of its winner.
   void StartSimilaritySearch(double threshold);
+
+  // Cancelled separately, because the two searches are invalidated by
+  // different things. A similarity search hunts for something LIKE the
+  // current instrument, so anything that replaces that instrument ends it. A
+  // sample search hunts for something like a loaded RECORDING, which none of
+  // those touch -- and it costs a full offline render per candidate, so
+  // throwing one away on an unrelated action would discard real work.
+  void CancelSimilaritySearch();
+  void CancelSampleSearch();
   void CancelSearches();
 
   // A finished search adopts its best seed -- but only if the user has not

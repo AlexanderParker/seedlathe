@@ -36,6 +36,10 @@ namespace {
 constexpr int kMidiMiddleC = 60;
 constexpr int kMaxVoices = 64;
 
+// Tab order, so the one place that needs to name a tab by index does not do
+// it with a bare number.
+constexpr int kTabSearch = 2;
+
 // C2 to C6, centred on middle C.
 constexpr int kKeyboardLowNote = 36;
 constexpr int kKeyboardHighNote = 84;
@@ -217,7 +221,7 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
       // Show the page that reports it either way, or the button looks like it
       // did nothing at all.
       if (auto* t = g->GetControlWithTag(kCtrlTagTabBar))
-        t->As<TabBarControl>()->Select(2);
+        t->As<TabBarControl>()->Select(kTabSearch);
     });
     btn(1, 1, "Panic", style, [this] { P().pool.allNotesOff(); });
     btn(2, 1, "Stop Search", style, [this] { CancelSearches(); });
@@ -246,11 +250,19 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
 
     g->AttachControl(new TabBarControl(
         tabBar, {"Instrument", "Presets", "Search", "Sample", "Design", "Settings"},
-        [g](int index) {
+        [this, g](int index) {
           static const char* kGroups[] = {"instrument", "presets", "search",
                                           "sample", "design", "settings"};
           for (int i = 0; i < 6; ++i)
             g->ForControlInGroup(kGroups[i], [i, index](IControl* c) { c->Hide(i != index); });
+
+          // A similarity search only runs while its own tab is showing.
+          //
+          // It hunts for something LIKE the current instrument, so it is only
+          // meaningful for as long as that instrument is what you are looking
+          // at -- and it burns a core the whole time. Navigating away is the
+          // clearest possible statement that you have moved on.
+          if (index != kTabSearch) CancelSimilaritySearch();
         }), kCtrlTagTabBar);
 
     // -- Instrument
@@ -320,7 +332,7 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
           Click([this] { if (!mSearch.running()) StartSimilaritySearch(mSearchThreshold); }),
           "Search until 90%", style), kNoTag, "search");
       g->AttachControl(new IVButtonControl(row.GetGridCell(2, 1, 3).GetPadded(-4.f),
-          Click([this] { CancelSearches(); }), "Stop", style), kNoTag, "search");
+          Click([this] { CancelSimilaritySearch(); }), "Stop", style), kNoTag, "search");
       g->AttachControl(new ITextControl(page.GetReducedFromTop(94.f).GetFromTop(28.f),
           "Idle", IText(15.f, kTextCol)), kCtrlTagSearchStatus, "search");
 
@@ -703,6 +715,12 @@ void Seedlathe::SetOscCount(int n)
 
 void Seedlathe::PushEdit()
 {
+  // Editing the design moves the target out from under a running similarity
+  // search just as surely as loading a different seed does -- the results it
+  // has already banked were scored against an instrument that no longer
+  // exists.
+  CancelSimilaritySearch();
+
   P().edited = true;
   P().pendingPublish = true;
   ServicePending(P());
@@ -1145,7 +1163,7 @@ void Seedlathe::BuildSamplePage(IGraphics* g, const IRECT& page, const IVStyle& 
       Click([startSample] { startSample(85.0); }), "Search until 85%", style),
       kNoTag, "sample");
   g->AttachControl(new IVButtonControl(row.GetGridCell(2, 1, 3).GetPadded(-4.f),
-      Click([this] { CancelSearches(); }), "Stop", style), kNoTag, "sample");
+      Click([this] { CancelSampleSearch(); }), "Stop", style), kNoTag, "sample");
 
   g->AttachControl(new ITextControl(page.GetReducedFromTop(144.f).GetFromTop(28.f),
       "Idle", IText(15.f, kTextCol)), kCtrlTagSampleStatus, "sample");
@@ -1341,9 +1359,12 @@ void Seedlathe::ApplySnapshot(const seedlathe::Snapshot& s)
 
   mRestoring = false;
 
-  // Stepping through history is the user choosing a sound, so a search still
-  // running must not overwrite it when it ends.
-  mAdoptSearch = false;
+  // Stepping through history replaces the instrument, which is the thing a
+  // similarity search is searching for. Same reasoning as rolling the dice:
+  // stop it rather than let it run on against a target that has gone.
+  CancelSimilaritySearch();
+
+  // Either search finishing now must not overwrite the sound just restored.
   mAdoptSampleSearch = false;
 
   SyncDesigner();
@@ -1370,12 +1391,22 @@ void Seedlathe::StartSimilaritySearch(double threshold)
   mAdoptSearch = true;
 }
 
-void Seedlathe::CancelSearches()
+void Seedlathe::CancelSimilaritySearch()
 {
   mSearch.cancel();
-  mSampleSearch.cancel();
   mAdoptSearch = false;
+}
+
+void Seedlathe::CancelSampleSearch()
+{
+  mSampleSearch.cancel();
   mAdoptSampleSearch = false;
+}
+
+void Seedlathe::CancelSearches()
+{
+  CancelSimilaritySearch();
+  CancelSampleSearch();
 }
 
 void Seedlathe::SetSeed(uint32_t seed)
@@ -1409,11 +1440,11 @@ void Seedlathe::SetSeed(uint32_t seed)
 
 void Seedlathe::RollRandomSeed()
 {
-  // Rolling the dice abandons the hunt. A search is a search for something
-  // LIKE the current instrument, so the moment that instrument is thrown away
-  // the search is answering a question nobody is asking any more -- and it
-  // would go on burning a thread to do it.
-  CancelSearches();
+  // Rolling the dice abandons the hunt. A similarity search is a search for
+  // something LIKE the current instrument, so the moment that instrument is
+  // thrown away the search is answering a question nobody is asking any more
+  // -- and it would go on burning a thread to do it.
+  CancelSimilaritySearch();
 
   // xorshift: a roll only has to feel random, and this keeps no state worth
   // persisting.
@@ -1707,6 +1738,11 @@ void Seedlathe::OnParamChange(int paramIdx)
              paramIdx == sl::kVoices) {
     Reconfigure();
   }
+}
+
+void Seedlathe::OnUIClose()
+{
+  CancelSearches();
 }
 
 void Seedlathe::OnIdle()
