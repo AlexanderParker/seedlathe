@@ -12,6 +12,17 @@ enum ParamIdx {
     kTypeFilter,   // which instrument type the dice rolls, 0 = any
     kOversample,   // 0 = off, 1 = 2x, 2 = 4x; the engine rate multiplier
     kMultitimbral, // off: every channel plays part 1; on: channel selects the part
+
+    // Live filter modulation. These are the only two parameters that reach a
+    // note already sounding, which is the point of them: a seed's filter is
+    // scheduled entirely at note-on, so without a modulation path there is no
+    // way to play the instrument rather than merely trigger it.
+    //
+    // Cutoff is a transposition in semitones, not an offset in Hz, because
+    // Web Audio's BiquadFilterNode.detune is multiplicative and zyn.js gets
+    // the same control the same way.
+    kFilterCutoff,
+    kFilterRes,    // dB added to the Q envelope; Web Audio's lowpass Q is in dB
     kNumParams
 };
 

@@ -82,6 +82,13 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
                                       "Off", "2x", "4x");
   GetParam(sl::kMultitimbral)->InitBool("Multitimbral", false);
 
+  // Four octaves each way is enough to sweep a seed's filter from closed to
+  // wide open and back; the envelope it sits on top of is scaled to 20 kHz,
+  // so anything wider only pins against the Nyquist clamp. Resonance is
+  // bounded at the engine too -- see Voice::renderOscillator.
+  GetParam(sl::kFilterCutoff)->InitDouble("Cutoff", 0., -48., 48., 0.01, "st");
+  GetParam(sl::kFilterRes)->InitDouble("Resonance", 0., -30., 30., 0.01, "dB");
+
   for (auto& slot : mPendingProgram) slot.store(-1, std::memory_order_relaxed);
 
   // Part 1 always exists, so it is requested from the start. Without this
@@ -1573,6 +1580,15 @@ void Seedlathe::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
   // Parts sum into one bus, which is what a multitimbral instrument on a single
   // stereo output means. Silent parts are skipped entirely rather than rendered
   // and added as zero: with sixteen parts allocated that is most of them.
+  // Read once per block rather than from OnParamChange: automation arrives on
+  // this thread anyway, and a block boundary is exactly the granularity the
+  // voices smooth from. Applied to every allocated part, sounding or not --
+  // a part that starts a note later this block must already be in step.
+  const double modCutoff = GetParam(sl::kFilterCutoff)->Value();
+  const double modRes = GetParam(sl::kFilterRes)->Value();
+  for (auto& part : mParts)
+    if (part.allocated) part.pool.setFilterMod(modCutoff, modRes);
+
   for (auto& part : mParts)
   {
     if (!part.allocated || !part.sounding()) continue;

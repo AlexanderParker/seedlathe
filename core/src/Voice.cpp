@@ -41,6 +41,10 @@ double noteFrequency(int rootNote, int noteOffset) {
 void Voice::prepare(double sampleRate) {
     sampleRate_ = sampleRate;
     rack_ = nullptr;
+    // Linear per-sample rate for the modulation smoother, scaled by the
+    // sub-block length at use. A one-pole coefficient computed per sub-block
+    // would cost an exp() every 32 samples per voice for no audible gain.
+    modCoefPerSample_ = 1.0 / std::max(1.0, kModSmoothSeconds * sampleRate);
     for (auto& o : oscs_) {
         o.osc.prepare(sampleRate);
         o.noise.prepare(sampleRate);
@@ -74,6 +78,12 @@ void Voice::noteOn(SharedFxRack* rack, const Instrument& inst, int note,
     endTime_ = 0.0;
     startStamp_ = ++g_stamp;
     WaPanner::gains(0.0, panL_, panR_);
+
+    // Start on the current modulation rather than gliding onto it. An idle
+    // voice's smoother is frozen wherever its last note left it, so without
+    // this a note struck after a cutoff sweep would open from the old value.
+    cutoffMod_ = cutoffModTarget_;
+    resMod_ = resModTarget_;
 
     const int n = inst_.oscCount;
     // zyn: voiceGain = 1 / (notes * oscs), and layer.gain = 0.5 * gain.
@@ -281,7 +291,15 @@ void Voice::renderOscillator(int oscIndex, int frames, int outOffset,
 
         double cutoff = s.filterEnv.nextValue();
         if (s.hasFLfo) cutoff += s.fLfo.render(c.fLfo.frequency) * s.fLfoDepth;
-        const double q = s.qEnv.nextValue();
+        // Live modulation goes on last, after the LFO, because Web Audio's
+        // detune scales the COMPUTED frequency -- automation plus every
+        // connected input -- not the automation alone.
+        cutoff *= cutoffMod_;
+        // Q from the envelope is 0..30 dB, so the clamp only ever bites once
+        // the user has moved the resonance control. +40 dB is a lowpass
+        // resonance of 100; beyond that the peak is loud enough to be a
+        // hazard rather than a sound.
+        const double q = std::clamp(s.qEnv.nextValue() + resMod_, -30.0, 40.0);
         // Coefficients are refreshed every kCoeffInterval samples. Recomputing
         // them costs about seven times the filtering itself -- two
         // transcendentals plus a pow -- and the envelopes driving cutoff and Q
@@ -320,6 +338,17 @@ void Voice::processBlock(int frames) {
 
     while (done < frames && active_) {
         int n = std::min(subBlock_, frames - done);
+
+        // Advance the filter modulation smoother for this span. Scaling the
+        // rate by n rather than applying a fixed step keeps the glide the same
+        // length in seconds whether the sub-block is 32 samples or 1 -- FM
+        // delays shorter than 32 samples drop the voice to single-sample
+        // steps, and without the scaling the glide would finish 32x early.
+        {
+            const double a = std::min(1.0, modCoefPerSample_ * double(n));
+            cutoffMod_ += (cutoffModTarget_ - cutoffMod_) * a;
+            resMod_ += (resModTarget_ - resMod_) * a;
+        }
 
         // Release ramps and end-of-note detection. releaseLen_ is the LONGEST
         // of the per-oscillator releases, so the voice lives until the slowest
@@ -379,6 +408,12 @@ void VoicePool::prepare(double sampleRate, int maxVoices) {
     mixL_.assign(SharedFxRack::kMaxBlock, 0.0f);
     mixR_.assign(SharedFxRack::kMaxBlock, 0.0f);
     for (auto& v : voices_) v.prepare(sampleRate);
+
+    // Fresh voices start unmodulated, so the cache has to agree or the next
+    // setFilterMod would early-out and leave them there.
+    cutoffSemis_ = 0.0;
+    resonanceDb_ = 0.0;
+    cutoffRatio_ = 1.0;
 }
 
 void VoicePool::noteOn(SharedFxRack* rack, const Instrument& inst, int note,
@@ -408,6 +443,16 @@ void VoicePool::noteOff(int note) {
         if (sustainPedal_) v.holdForSustain();
         else v.noteOff();
     }
+}
+
+void VoicePool::setFilterMod(double cutoffSemitones, double resonanceDb) {
+    if (cutoffSemitones == cutoffSemis_ && resonanceDb == resonanceDb_) return;
+    cutoffSemis_ = cutoffSemitones;
+    resonanceDb_ = resonanceDb;
+    cutoffRatio_ = std::pow(2.0, cutoffSemitones / 12.0);
+    // Every voice, not only the sounding ones: an idle voice recycled by the
+    // next note-on would otherwise start on whatever it last held.
+    for (auto& v : voices_) v.setFilterMod(cutoffRatio_, resonanceDb_);
 }
 
 void VoicePool::setPitchBend(double semitones) {

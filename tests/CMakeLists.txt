@@ -23,6 +23,7 @@ add_executable(sl_tests
   test_oversampler.cpp
   test_topresults.cpp
   test_quiescer.cpp
+  test_filtermod.cpp
   test_perf.cpp
 )
 

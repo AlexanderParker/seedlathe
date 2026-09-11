@@ -45,6 +45,28 @@ public:
     // rather than to the base pitch: bending a note bends its vibrato and its
     // FM sidebands with it, which is what a detune input does in Web Audio.
     void setBendRatio(double ratio) { bendRatio_ = ratio; }
+
+    // Live filter modulation, applied on top of the scheduled cutoff and Q
+    // envelopes and therefore heard on notes that are already sounding.
+    //
+    // cutoffRatio MULTIPLIES the cutoff, matching Web Audio's
+    // BiquadFilterNode.detune -- the computed frequency there is
+    // frequency * 2^(detune/1200), so a ratio is the exact analogue of a
+    // detune in cents. An additive Hz offset would be the easier thing to
+    // write and the wrong thing to play: it is inaudible on a cutoff sitting
+    // at 15 kHz and catastrophic on one at 200 Hz.
+    //
+    // resonanceDb ADDS to the Q envelope, because Web Audio's Q for a lowpass
+    // is already in decibels (see WaBiquad::setCoefficients).
+    //
+    // Both are no-ops at their defaults -- x1.0 and +0.0 are exact in IEEE
+    // arithmetic -- so an unmodulated voice renders sample for sample what it
+    // rendered before this existed.
+    void setFilterMod(double cutoffRatio, double resonanceDb) {
+        cutoffModTarget_ = cutoffRatio;
+        resModTarget_ = resonanceDb;
+    }
+
     void kill();                    // immediate, for voice stealing
 
     // Renders `frames` samples into the shared FX graph's block buffers.
@@ -123,6 +145,16 @@ private:
     bool released_ = false;
     bool sustainHeld_ = false;
     double bendRatio_ = 1.0;
+
+    // Filter modulation, and the smoother that keeps a knob sweep from
+    // stepping the coefficients audibly. Targets are written from outside at
+    // block boundaries; the smoothed values advance once per sub-block, so the
+    // granularity is 32 samples rather than a whole host block.
+    double cutoffModTarget_ = 1.0, resModTarget_ = 0.0;
+    double cutoffMod_ = 1.0, resMod_ = 0.0;
+    double modCoefPerSample_ = 0.0;
+    static constexpr double kModSmoothSeconds = 0.012;
+
     int note_ = 0;
     double level_ = 0.0;
     double t_ = 0.0;
@@ -159,6 +191,16 @@ public:
     void setPitchBend(double semitones);
     double pitchBend() const { return bendSemitones_; }
 
+    // Live filter modulation for every voice, sounding or not yet started.
+    //
+    // cutoffSemitones transposes the filter cutoff the way a note number
+    // transposes a pitch; resonanceDb adds to the Q envelope. Cheap enough to
+    // call every block -- it converts once and early-outs when nothing moved --
+    // which is how the plugin keeps it in step with host automation.
+    void setFilterMod(double cutoffSemitones, double resonanceDb);
+    double filterModSemitones() const { return cutoffSemis_; }
+    double filterModResonanceDb() const { return resonanceDb_; }
+
     // Mixes every rack that sounding voices reference, and -- when the caller
     // supplies the full set -- every rack still ringing. A reverb tail
     // outlives the note that caused it, so dropping a rack the moment its last
@@ -184,6 +226,8 @@ private:
     double sampleRate_ = 48000.0;
     bool sustainPedal_ = false;
     double bendSemitones_ = 0.0;
+    double cutoffSemis_ = 0.0, resonanceDb_ = 0.0;
+    double cutoffRatio_ = 1.0;
 };
 
 } // namespace sl
