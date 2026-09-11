@@ -14,10 +14,7 @@ means sharing ten digits.
 
 ## Finding a sound
 
-Because you can't design a seed, the work is browsing rather than building.
-There are four ways in.
-
-**Random** rolls a new one. The roll type selector restricts it to a family —
+**Random** rolls a new seed. The roll type selector restricts it to a family —
 pad, lead, bass, key, pluck, bell, string, drum, perc, FX — so you can look
 for a bass without wading through drums.
 
@@ -41,6 +38,10 @@ envelopes for gain, cutoff and resonance, three LFOs, FM, a pitch envelope,
 distortion, delay and reverb. There is also a 5×5 matrix for FM between
 oscillators. Changes are audible immediately, and **Revert to seed** undoes
 all of them.
+
+You can also go the other way: design what you want, then **Find Similar** to
+get the nearest seed to it. The design travels in the project either way, but
+a seed is the thing you can write down.
 
 Patches copy and paste as JSON if you want to keep one outside the plugin.
 

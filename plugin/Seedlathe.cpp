@@ -318,8 +318,10 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
 
     // -- Search
     g->AttachControl(new ITextControl(page.GetFromTop(46.f),
-        "Searches seeds of the same instrument type and keeps the best match "
-        "found. Cancelling keeps it too.",
+        "Searches seeds of the same type as the current instrument, including "
+        "anything you have designed, and keeps the twenty closest.
+"
+        "Stopping keeps them too.",
         IText(12.f, kDim)), kNoTag, "search");
     {
       const IRECT row = page.GetReducedFromTop(50.f).GetFromTop(36.f).GetFromLeft(560.f);
@@ -1387,7 +1389,12 @@ void Seedlathe::GoForward()
 
 void Seedlathe::StartSimilaritySearch(double threshold)
 {
-  mSearch.start(P().livePatch(), threshold);
+  // The EDIT buffer, not the published patch. The intended workflow is to
+  // design an instrument and then go looking for the seed nearest to it, and
+  // a publish can still be queued when the search starts -- RackPool refuses
+  // a rebuild while every rack is sounding -- so livePatch() would sometimes
+  // hunt for the sound from before the last few edits.
+  mSearch.start(P().edit, threshold);
   mAdoptSearch = true;
 }
 
