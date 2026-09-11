@@ -174,17 +174,18 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
     g->LoadFont("Roboto-Regular", ROBOTO_FN);
 
     const IRECT all = g->GetBounds();
-    const IRECT top = all.GetFromTop(124.f).GetPadded(-10.f);
+    const IRECT top = all.GetFromTop(120.f).GetPadded(-10.f);
     const IRECT keys = all.GetFromBottom(150.f).GetPadded(-10.f);
-    const IRECT mid = all.GetReducedFromTop(124.f).GetReducedFromBottom(150.f).GetPadded(-10.f);
+    const IRECT mid = all.GetReducedFromTop(120.f).GetReducedFromBottom(150.f).GetPadded(-10.f);
 
     // ---- top bar -------------------------------------------------------
     //
     // Two rows deep, because everything here is something you reach for WHILE
-    // playing -- the seed, the sounds either side of it, the type the dice
-    // rolls, the part, and the four knobs. Anything you set once and forget
-    // is on the Settings tab instead.
-    g->AttachControl(new SeedBoxControl(top.GetFromLeft(180.f),
+    // playing: the seed, the sounds either side of it, the type the dice
+    // rolls, and the four knobs. Everything you set once and forget is on the
+    // Settings tab, and moving the part strip there is what made the room for
+    // the rest of this without the window having to grow.
+    g->AttachControl(new SeedBoxControl(top.GetFromLeft(220.f),
                                         [this](uint32_t s) { SetSeed(s); }, style),
                      kCtrlTagSeedBox);
 
@@ -194,7 +195,7 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
     // state exactly where the other buttons' normal state sits.
     const IVStyle stepStyle = style.WithColor(kFG, IColor(255, 84, 92, 106));
 
-    const IRECT btns = top.GetReducedFromLeft(188.f).GetFromLeft(230.f);
+    const IRECT btns = top.GetReducedFromLeft(228.f).GetFromLeft(270.f);
     const auto btn = [&](int col, int row, const char* label, const IVStyle& st,
                          std::function<void()> fn, int tag = kNoTag) {
       const IRECT cell(btns.L + btns.W() / 3.f * float(col),
@@ -222,20 +223,11 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
     btn(2, 1, "Stop Search", style, [this] { CancelSearches(); });
 
     g->AttachControl(new seedlathe::TypeGridControl(
-        top.GetReducedFromLeft(426.f).GetFromLeft(240.f), sl::kTypeFilter));
-
-    {
-      const IRECT strip = top.GetReducedFromLeft(674.f).GetFromLeft(260.f);
-      auto* parts = new PartStripControl(
-          strip, sl::kNumParts,
-          [this](int i) { return mParts[static_cast<size_t>(i)].allocated; },
-          [this](int i) { SelectPart(i); });
-      g->AttachControl(parts, kCtrlTagPartStrip);
-    }
+        top.GetReducedFromLeft(506.f).GetFromLeft(300.f), sl::kTypeFilter));
 
     // Cutoff and Resonance sit beside Volume and Octave because they belong to
     // the same class of control: things you move with a chord held down.
-    const IRECT knobs = top.GetFromRight(300.f);
+    const IRECT knobs = top.GetFromRight(340.f);
     g->AttachControl(new IVKnobControl(knobs.GetGridCell(0, 1, 4).GetPadded(-4.f),
                                        sl::kVolume, "Volume", style));
     g->AttachControl(new IVKnobControl(knobs.GetGridCell(1, 1, 4).GetPadded(-4.f),
@@ -1062,19 +1054,31 @@ void Seedlathe::BuildSettingsPage(IGraphics* g, const IRECT& page, const IVStyle
     note(IRECT(in.L, p.T + 88.f, in.R, p.T + 104.f),
          "host sending on channel 1 expects.");
     note(IRECT(in.L, p.T + 108.f, in.R, p.T + 124.f),
-         "On: the channel selects the part, and the strip in");
+         "On: the channel selects the part, and the strip");
     note(IRECT(in.L, p.T + 124.f, in.R, p.T + 140.f),
-         "the header chooses which one you are editing.");
+         "below chooses which one you are editing.");
     note(IRECT(in.L, p.T + 144.f, in.R, p.T + 160.f),
          "Each part is a whole engine -- delay feedback and");
     note(IRECT(in.L, p.T + 160.f, in.R, p.T + 176.f),
          "reverb tails cannot be shared between instruments");
     note(IRECT(in.L, p.T + 176.f, in.R, p.T + 192.f),
          "-- so parts are allocated as you address them.");
-    note(IRECT(in.L, p.T + 200.f, in.R, p.T + 216.f),
+    note(IRECT(in.L, p.T + 196.f, in.R, p.T + 212.f),
          "Pitch bend, sustain (CC 64) and program change are");
-    note(IRECT(in.L, p.T + 216.f, in.R, p.T + 232.f),
+    note(IRECT(in.L, p.T + 212.f, in.R, p.T + 228.f),
          "handled per part.");
+
+    // The part strip lives here rather than in the header. It is the MIDI
+    // setup -- which channel you are editing -- and it is dead weight in
+    // single mode, which is most of the time. Which part is selected still
+    // shows on the Instrument tab, in the line above the oscillators.
+    {
+      auto* parts = new PartStripControl(
+          IRECT(in.L, p.T + 240.f, in.R, p.T + 308.f), sl::kNumParts,
+          [this](int i) { return mParts[static_cast<size_t>(i)].allocated; },
+          [this](int i) { SelectPart(i); });
+      g->AttachControl(parts, kCtrlTagPartStrip, "settings");
+    }
   }
 
   // ---- about --------------------------------------------------------------

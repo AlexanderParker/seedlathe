@@ -38,8 +38,9 @@ same here as it does on the zyn demo page — enforced by automated tests, not b
   reverb, and the 5×5 FM matrix. Patches copy and paste as zyn's own JSON.
 - **Presets.** 115 factory presets from the demo page, plus your own bank.
 - **Multitimbral.** Sixteen parts, one per MIDI channel, allocated as you use them.
-- **Settings.** Engine and MIDI options live on their own tab, so the header holds only
-  what you reach for while playing.
+- **Settings.** Engine and MIDI options -- oversampling, polyphony, multitimbral and
+  the part strip -- live on their own tab, so the header holds only what you reach for
+  while playing.
 - **Oversampling.** 2× or 4×, off by default — it is a deviation from zyn, which runs
   its graph at the host rate.
 - **Export.** Render the current instrument to a 32-bit float stereo WAV.
