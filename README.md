@@ -91,6 +91,20 @@ Artefacts land in `build/out/`.
 `%LOCALAPPDATA%/Programs/Common/VST3` and `.../CLAP` as a post-build step, so the
 plugin appears in your DAW's scan after every build.
 
+## How This Was Built
+
+[zyn.js](https://github.com/AlexanderParker/zyn) came first, and its synth core
+was written by hand. This C++ port was not: Seedlathe was written by Claude
+(Anthropic's Claude Code), working from that library, under my direction and
+review.
+
+That is a claim worth being able to check rather than take on trust, which is
+why the fidelity testing below exists. A port is only worth anything if a seed
+sounds the same in both, so the suite renders seeds through both engines and
+compares them, and the golden vectors in `vectors/` are committed so anyone can
+re-run it. The commit history records which changes were AI-written; nearly all
+of them were.
+
 ## Licensing
 
 - zyn core algorithm: MIT

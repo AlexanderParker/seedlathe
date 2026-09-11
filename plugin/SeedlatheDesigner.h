@@ -15,6 +15,7 @@
 
 #include "IControl.h"
 #include "IControls.h"
+#include "SeedlatheControls.h"   // OpenTextEntry
 #include "sl/Instrument.h"
 
 #include <algorithm>
@@ -219,7 +220,7 @@ private:
     void PromptForEntry() {
         char buf[48];
         std::snprintf(buf, sizeof(buf), "%.*f", mDecimals, mVal);
-        GetUI()->CreateTextEntry(*this, IText(12.f), mRECT, buf);
+        OpenTextEntry(*this, IText(12.f), mRECT, buf);
     }
 
     void Commit(double v) {

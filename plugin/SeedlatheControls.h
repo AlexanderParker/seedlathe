@@ -13,10 +13,62 @@
 #include <string>
 #include <vector>
 
+#ifdef OS_WIN
+#include <windows.h>
+#endif
+
 using namespace iplug;
 using namespace igraphics;
 
 namespace seedlathe {
+
+// Opens a text entry that does not play the system alert sound.
+//
+// IGraphics creates its entry as a multiline EDIT without ES_WANTRETURN.
+// Windows then reads Enter as "activate the default pushbutton", finds none in
+// a plain child window, and calls MessageBeep -- so committing a preset name
+// dinged. iPlug2 never sees the keystroke: its own WM_CHAR filter runs only
+// for entries bound to a PARAMETER, and none of this plugin's entries are.
+// That is also what made the bug easy to miss, since a parameter entry drops
+// Enter silently as "not a digit".
+//
+// Subclassing on top of iPlug2's own subclass is the smallest fix reachable
+// from here. The alternative is forking the submodule over two keycodes, and
+// a patched submodule would not survive a fresh clone.
+inline void OpenTextEntry(IControl& control, const IText& text,
+                          const IRECT& bounds, const char* initial) {
+    IGraphics* g = control.GetUI();
+    if (!g) return;
+    g->CreateTextEntry(control, text, bounds, initial ? initial : "");
+
+#ifdef OS_WIN
+    // The edit window exists by now: CreatePlatformTextEntry creates it
+    // synchronously. It is the only EDIT child IGraphics makes, and it is
+    // destroyed with the entry, so there is nothing to unhook -- iPlug2
+    // restores the original proc and destroys the window, which drops ours
+    // out of the chain.
+    static WNDPROC sChained = nullptr;
+    struct Quiet {
+        static LRESULT CALLBACK Proc(HWND h, UINT msg, WPARAM w, LPARAM l) {
+            if (msg == WM_CHAR && (w == VK_RETURN || w == VK_ESCAPE)) return 0;
+            return CallWindowProcW(sChained, h, msg, w, l);
+        }
+    };
+
+    HWND parent = static_cast<HWND>(g->GetWindow());
+    if (!parent) return;
+    HWND edit = FindWindowExW(parent, nullptr, L"EDIT", nullptr);
+    if (!edit) return;
+
+    // One static for the chained proc is enough however many editors are
+    // open: what we chain to is always iPlug2's ParamEditProc, which is
+    // itself a single static function.
+    WNDPROC current = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(edit, GWLP_WNDPROC));
+    if (current == &Quiet::Proc) return;
+    sChained = current;
+    SetWindowLongPtrW(edit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&Quiet::Proc));
+#endif
+}
 
 inline const char* TypeName(int i) {
     static const char* kNames[] = {"Pad", "Lead", "Bass", "Key", "Pluck",
@@ -297,7 +349,7 @@ private:
     void PromptForEntry() {
         char buf[32];
         std::snprintf(buf, sizeof(buf), "%u", mSeed);
-        GetUI()->CreateTextEntry(*this, IText(18.f), mRECT.GetReducedFromTop(14.f), buf);
+        OpenTextEntry(*this, IText(18.f), mRECT.GetReducedFromTop(14.f), buf);
     }
 
     void Commit(uint32_t s) {
@@ -458,7 +510,7 @@ public:
 
     void Prompt(const IRECT& where, const char* initial, DoneFunc done) {
         mDone = std::move(done);
-        GetUI()->CreateTextEntry(*this, IText(14.f), where, initial ? initial : "");
+        OpenTextEntry(*this, IText(14.f), where, initial);
     }
 
     void Draw(IGraphics&) override {}
