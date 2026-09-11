@@ -60,6 +60,7 @@ enum EControlTags
   kCtrlTagSampleResults,
   kCtrlTagTabBar,
   kCtrlTagBack,
+  kCtrlTagNext,
   kCtrlTagComponents,
   kNumCtrlTags
 };
@@ -119,11 +120,29 @@ private:
   // the next replacement takes anyway.
   void PushHistory();
   void GoBack();
+  void GoForward();
   bool CanGoBack() const { return !P().history.empty(); }
+  bool CanGoForward() const { return !P().future.empty(); }
 
-  // True while GoBack is applying a snapshot, so the paths it drives do not
-  // record the state it is in the middle of replacing.
+  // Shared by GoBack and GoForward: the snapshot of where we are now, and the
+  // application of one taken off either stack.
+  seedlathe::Snapshot CurrentSnapshot() const;
+  void ApplySnapshot(const seedlathe::Snapshot& s);
+
+  // True while Back or Next is applying a snapshot, so the paths they drive
+  // do not record the state they are in the middle of replacing.
   bool mRestoring = false;
+
+  // Starts a similarity search and arms adoption of its winner.
+  void StartSimilaritySearch(double threshold);
+  void CancelSearches();
+
+  // A finished search adopts its best seed -- but only if the user has not
+  // chosen a sound in the meantime. Rolling the dice, loading a preset or
+  // picking a result all clear this, so a search that ends afterwards cannot
+  // reach back and overwrite what the user actually wanted.
+  bool mAdoptSearch = false;
+  bool mAdoptSampleSearch = false;
 
   // The designer changed mEdit: mark it edited and queue publication.
   void PushEdit();
@@ -161,6 +180,7 @@ private:
   void SetOscCount(int n);
   void BuildDesigner(IGraphics* g, const IRECT& page, const IVStyle& style);
   void BuildSamplePage(IGraphics* g, const IRECT& page, const IVStyle& style);
+  void BuildSettingsPage(IGraphics* g, const IRECT& page, const IVStyle& style);
 
   void LoadSampleTarget();
   void ExportWav();
@@ -242,6 +262,12 @@ private:
   IBufferSender<1, 8, 128> mScopeSender;
   bool mSearchWasRunning = false;
   double mSearchThreshold = 90.0;
+  // Seeded from the clock in the constructor, not from a constant.
+  //
+  // A fixed state made the dice deterministic per instance: every fresh
+  // launch rolled the same first seed, then the same second one. The first
+  // press after opening the plugin always landed on the same instrument,
+  // which is a poor thing for a button labelled Random to do.
   uint32_t mRollState = 0x9E3779B9u;
 #endif
 };

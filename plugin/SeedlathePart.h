@@ -77,6 +77,11 @@ struct Part {
     static constexpr size_t kMaxHistory = 64;
     std::vector<Snapshot> history;
 
+    // Sounds stepped back OVER, newest first, so Next can walk forwards again.
+    // Cleared by any new sound: once you branch, the path you came back from
+    // is not somewhere "forward" any more.
+    std::vector<Snapshot> future;
+
     // Dragging the seed box emits a new seed per mouse move, and each one
     // replaces the instrument. Recording them all would bury the sound the
     // user actually wants under a hundred positions of one gesture, so pushes
@@ -109,6 +114,32 @@ struct Part {
             return;
         if (history.size() >= kMaxHistory) history.erase(history.begin());
         history.push_back(s);
+
+        // A new sound is a branch, and there is nothing forward of a branch.
+        future.clear();
+    }
+
+    // Back: the caller hands over the sound being left, which becomes the
+    // forward step, and receives the one to restore. Returns false when there
+    // is nothing behind.
+    bool stepBack(const Snapshot& leaving, Snapshot& restored) {
+        if (history.empty()) return false;
+        restored = history.back();
+        history.pop_back();
+        if (future.size() >= kMaxHistory) future.erase(future.begin());
+        future.push_back(leaving);
+        return true;
+    }
+
+    // Next: the mirror of stepBack. The sound being left goes back onto the
+    // history, so Back and Next walk the same line in both directions.
+    bool stepForward(const Snapshot& leaving, Snapshot& restored) {
+        if (future.empty()) return false;
+        restored = future.back();
+        future.pop_back();
+        if (history.size() >= kMaxHistory) history.erase(history.begin());
+        history.push_back(leaving);
+        return true;
     }
 
     // Parts other than the first are only allocated once something addresses

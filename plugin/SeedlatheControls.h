@@ -6,10 +6,11 @@
 #include "UserPresets.h"
 #include "sl/FactoryPresets.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <functional>
 #include <string>
-#include <algorithm>
 #include <vector>
 
 using namespace iplug;
@@ -22,6 +23,203 @@ inline const char* TypeName(int i) {
                                    "Bell", "String", "Drum", "Perc", "FX"};
     return (i >= 0 && i < 10) ? kNames[i] : "?";
 }
+
+// A glyph per instrument type, drawn into `box` -- which should be square.
+//
+// Hand-drawn paths rather than an icon font: the plugin ships one font for
+// text and adding a second purely for eleven marks is a resource, a licence
+// and a build step for something a dozen lines of geometry does. They are
+// deliberately schematic -- what the type's envelope or waveform looks like --
+// rather than pictorial, because at 20 px a picture of a bell is a smudge.
+//
+// typeIndex is 0-9 as the seed's last digit, or -1 for "any type".
+inline void DrawTypeIcon(IGraphics& g, const IRECT& box, int typeIndex,
+                         const IColor& color, float weight = 1.6f) {
+    const float l = box.L, r = box.R, t = box.T, b = box.B;
+    const float w = box.W(), h = box.H();
+    const float mx = box.MW(), my = box.MH();
+    const IPattern pat(color);
+
+    const auto stroke = [&] { g.PathStroke(pat, weight); };
+
+    g.PathClear();
+    switch (typeIndex) {
+        case -1:                     // Any -- a star, the wildcard
+            for (int i = 0; i < 3; ++i) {
+                const float a = 3.14159265f * (0.5f + float(i) / 3.f);
+                const float dx = std::cos(a) * w * 0.42f, dy = std::sin(a) * h * 0.42f;
+                g.PathMoveTo(mx - dx, my - dy);
+                g.PathLineTo(mx + dx, my + dy);
+            }
+            stroke();
+            break;
+
+        case 0:                      // Pad -- a slow swell
+            g.PathMoveTo(l, b);
+            g.PathCubicBezierTo(l + w * 0.35f, b, l + w * 0.2f, t, mx, t);
+            g.PathCubicBezierTo(r - w * 0.2f, t, r - w * 0.35f, b, r, b);
+            stroke();
+            break;
+
+        case 1:                      // Lead -- a sawtooth
+            g.PathMoveTo(l, b);
+            g.PathLineTo(l + w * 0.45f, t);
+            g.PathLineTo(l + w * 0.45f, b);
+            g.PathLineTo(r - w * 0.05f, t);
+            stroke();
+            break;
+
+        case 2:                      // Bass -- one long low wave
+            g.PathMoveTo(l, my);
+            g.PathCubicBezierTo(l + w * 0.25f, t, r - w * 0.25f, b, r, my);
+            stroke();
+            break;
+
+        case 3: {                    // Key -- piano keys
+            g.PathRect(IRECT(l + w * 0.08f, t + h * 0.1f, r - w * 0.08f, b - h * 0.1f));
+            stroke();
+            const float kw = w * 0.13f;
+            for (float x : {l + w * 0.28f, l + w * 0.55f}) {
+                g.PathClear();
+                g.PathRect(IRECT(x, t + h * 0.1f, x + kw, my + h * 0.12f));
+                g.PathFill(pat);
+            }
+            break;
+        }
+
+        case 4:                      // Pluck -- a spike that dies away
+            g.PathMoveTo(l + w * 0.12f, b);
+            g.PathLineTo(l + w * 0.24f, t);
+            g.PathCubicBezierTo(l + w * 0.5f, t + h * 0.55f, r - w * 0.2f, b, r, b);
+            stroke();
+            break;
+
+        case 5:                      // Bell -- the bell itself
+            g.PathMoveTo(l + w * 0.14f, b - h * 0.22f);
+            g.PathCubicBezierTo(l + w * 0.16f, t + h * 0.05f, r - w * 0.16f,
+                                t + h * 0.05f, r - w * 0.14f, b - h * 0.22f);
+            g.PathLineTo(l + w * 0.14f, b - h * 0.22f);
+            stroke();
+            g.PathClear();
+            g.PathCircle(mx, b - h * 0.08f, w * 0.07f);
+            g.PathFill(pat);
+            break;
+
+        case 6:                      // String -- a bowed, sustained wave
+            g.PathMoveTo(l, my);
+            for (int i = 0; i < 2; ++i) {
+                const float x0 = l + w * 0.5f * float(i);
+                g.PathCubicBezierTo(x0 + w * 0.12f, t + h * 0.18f,
+                                    x0 + w * 0.38f, b - h * 0.18f,
+                                    x0 + w * 0.5f, my);
+            }
+            stroke();
+            break;
+
+        case 7:                      // Drum -- a head, struck
+            g.PathCircle(mx, my + h * 0.08f, w * 0.34f);
+            stroke();
+            g.PathClear();
+            g.PathMoveTo(mx + w * 0.12f, t);
+            g.PathLineTo(mx + w * 0.34f, my - h * 0.14f);
+            stroke();
+            break;
+
+        case 8:                      // Perc -- a short transient burst
+            for (int i = 0; i < 3; ++i) {
+                const float x = l + w * (0.25f + 0.25f * float(i));
+                const float amp = h * (0.42f - 0.12f * float(i));
+                g.PathMoveTo(x, my - amp);
+                g.PathLineTo(x, my + amp);
+            }
+            stroke();
+            break;
+
+        default:                     // FX -- something unpredictable
+            g.PathMoveTo(l, my + h * 0.2f);
+            g.PathLineTo(l + w * 0.3f, my - h * 0.3f);
+            g.PathLineTo(l + w * 0.45f, my + h * 0.1f);
+            g.PathLineTo(l + w * 0.72f, my - h * 0.38f);
+            g.PathLineTo(r, my + h * 0.28f);
+            stroke();
+            break;
+    }
+}
+
+// The roll-type filter, as a grid of labelled icons rather than a knob.
+//
+// It was an IVKnobControl, which is the wrong instrument entirely: eleven
+// unordered names on a dial have no natural direction, no way to jump to one,
+// and no way to see which is selected without reading a value readout. A grid
+// shows all eleven and takes one click.
+//
+// Bound to a host parameter, so automation and the host's own generic editor
+// keep working.
+class TypeGridControl : public IControl {
+public:
+    TypeGridControl(const IRECT& bounds, int paramIdx)
+    : IControl(bounds, paramIdx) {}
+
+    void Draw(IGraphics& g) override {
+        const IRECT grid = mRECT.GetReducedFromTop(12.f);
+        g.DrawText(IText(10.f, IColor(255, 130, 140, 155), nullptr, EAlign::Near),
+                   "ROLL TYPE", mRECT.GetFromTop(12.f));
+
+        const int sel = Selected();
+        const float cw = grid.W() / float(kCols);
+        const float ch = grid.H() / float(kRows);
+
+        for (int i = 0; i < kCount; ++i) {
+            const IRECT cell = CellAt(grid, i);
+            const bool on = (i == sel);
+            g.FillRoundRect(on ? IColor(255, 62, 116, 178) : IColor(255, 26, 29, 34),
+                            cell.GetPadded(-1.f), 3.f);
+
+            const IColor ink = on ? IColor(255, 250, 252, 255) : IColor(255, 150, 160, 175);
+            // Icon over label, both inside the cell. The label is what makes
+            // the icons learnable; without it they are a guessing game.
+            const float iconH = std::min(cell.H() * 0.55f, cw * 0.55f);
+            const IRECT icon = IRECT(cell.MW() - iconH * 0.5f, cell.T + 3.f,
+                                     cell.MW() + iconH * 0.5f, cell.T + 3.f + iconH);
+            DrawTypeIcon(g, icon, i - 1, ink, on ? 1.8f : 1.4f);
+            g.DrawText(IText(9.f, ink, nullptr, EAlign::Center),
+                       i == 0 ? "Any" : TypeName(i - 1),
+                       cell.GetFromBottom(11.f));
+        }
+        (void)ch;
+    }
+
+    void OnMouseDown(float x, float y, const IMouseMod&) override {
+        const IRECT grid = mRECT.GetReducedFromTop(12.f);
+        for (int i = 0; i < kCount; ++i) {
+            if (!CellAt(grid, i).Contains(x, y)) continue;
+            if (i == Selected()) return;
+            SetValue(GetParam() ? GetParam()->ToNormalized(double(i))
+                                : double(i) / double(kCount - 1));
+            SetDirty(true);
+            return;
+        }
+    }
+
+private:
+    static constexpr int kCount = 11;    // "Any" plus the ten types
+    static constexpr int kCols = 6;
+    static constexpr int kRows = 2;
+
+    int Selected() const {
+        if (!GetParam()) return 0;
+        return std::clamp(static_cast<int>(std::lround(
+                              GetParam()->FromNormalized(GetValue()))), 0, kCount - 1);
+    }
+
+    IRECT CellAt(const IRECT& grid, int i) const {
+        const float cw = grid.W() / float(kCols);
+        const float ch = grid.H() / float(kRows);
+        const int col = i % kCols, row = i / kCols;
+        return IRECT(grid.L + cw * col, grid.T + ch * row,
+                     grid.L + cw * (col + 1), grid.T + ch * (row + 1));
+    }
+};
 
 // Displays the whole 32-bit seed as one number, even though the host sees two
 // 16-bit parameters. The split exists because a single float32 automation value

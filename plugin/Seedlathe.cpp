@@ -36,11 +36,36 @@ namespace {
 constexpr int kMidiMiddleC = 60;
 constexpr int kMaxVoices = 64;
 
+// C2 to C6, centred on middle C.
+constexpr int kKeyboardLowNote = 36;
+constexpr int kKeyboardHighNote = 84;
+
+// Where the project lives. The About panel links to both, because the
+// instruments this plugin generates are zyn's and a user who wants to know
+// what a seed IS has to end up there.
+constexpr const char* kSeedlatheUrl = "https://github.com/AlexanderParker/seedlathe";
+constexpr const char* kZynUrl = "https://github.com/AlexanderParker/zyn";
+
 const IColor kBg(255, 22, 24, 28);
 const IColor kPanel(255, 30, 33, 39);
 const IColor kTextCol(255, 222, 228, 236);
 const IColor kDim(255, 130, 140, 155);
 const IColor kAccent(255, 120, 190, 255);
+
+// Wraps a plain callback as a button action function.
+//
+// IButtonControlBase sets the control's value to 1 on mouse-down and back to
+// 0 only from OnEndAnimation -- and the only thing that starts an animation is
+// iPlug2's own SplashClickActionFunc. A button given its own action function
+// therefore latches: it draws pressed for ever after the first click, so the
+// whole top bar looked permanently active. Calling the splash first restores
+// both the reset and the click feedback that went missing with it.
+IActionFunction Click(std::function<void()> fn) {
+  return [fn = std::move(fn)](IControl* pCaller) {
+    SplashClickActionFunc(pCaller);
+    if (fn) fn();
+  };
+}
 
 IVStyle DarkStyle() {
   // Every slot has to be set, not just the obvious ones. kPR in particular is
@@ -91,6 +116,17 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
 
   for (auto& slot : mPendingProgram) slot.store(-1, std::memory_order_relaxed);
 
+  // Two instances constructed in the same tick would otherwise roll the same
+  // sequence, so the address of this instance goes in alongside the clock.
+  // Neither is a cryptographic concern; the dice only have to differ.
+  {
+    const uint64_t now = static_cast<uint64_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    const uint64_t here = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(this));
+    mRollState = static_cast<uint32_t>(now ^ (now >> 32) ^ here ^ (here >> 32));
+    if (mRollState == 0) mRollState = 0x9E3779B9u;   // xorshift cannot leave 0
+  }
+
   // Part 1 always exists, so it is requested from the start. Without this
   // SerializeState skipped it -- it only writes parts that something asked
   // for -- and every designer edit on it was silently dropped from the state
@@ -138,44 +174,58 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
     g->LoadFont("Roboto-Regular", ROBOTO_FN);
 
     const IRECT all = g->GetBounds();
-    const IRECT top = all.GetFromTop(96.f).GetPadded(-10.f);
+    const IRECT top = all.GetFromTop(124.f).GetPadded(-10.f);
     const IRECT keys = all.GetFromBottom(150.f).GetPadded(-10.f);
-    const IRECT mid = all.GetReducedFromTop(96.f).GetReducedFromBottom(150.f).GetPadded(-10.f);
+    const IRECT mid = all.GetReducedFromTop(124.f).GetReducedFromBottom(150.f).GetPadded(-10.f);
 
     // ---- top bar -------------------------------------------------------
-    g->AttachControl(new SeedBoxControl(top.GetFromLeft(200.f),
+    //
+    // Two rows deep, because everything here is something you reach for WHILE
+    // playing -- the seed, the sounds either side of it, the type the dice
+    // rolls, the part, and the four knobs. Anything you set once and forget
+    // is on the Settings tab instead.
+    g->AttachControl(new SeedBoxControl(top.GetFromLeft(180.f),
                                         [this](uint32_t s) { SetSeed(s); }, style),
                      kCtrlTagSeedBox);
 
-    const IRECT btns = top.GetReducedFromLeft(208.f).GetFromLeft(344.f);
-    g->AttachControl(new IVButtonControl(
-        btns.GetGridCell(0, 1, 4).GetPadded(-3.f),
-        [this](IControl*) { RollRandomSeed(); }, "Random", style));
-    // Its own fill, lighter than its neighbours'. IGraphics greys a disabled
-    // vector control by SUBTRACTING 64 from each channel, which on this dark
-    // palette lands on black and reads as a broken button rather than an
-    // unavailable one; starting 64 higher puts the disabled state exactly
-    // where the other buttons' normal state sits.
-    g->AttachControl(new IVButtonControl(
-        btns.GetGridCell(1, 1, 4).GetPadded(-3.f),
-        [this](IControl*) { GoBack(); }, "Back",
-        style.WithColor(kFG, IColor(255, 84, 92, 106))), kCtrlTagBack);
-    g->AttachControl(new IVButtonControl(
-        btns.GetGridCell(2, 1, 4).GetPadded(-3.f),
-        [this, g](IControl*) {
-          if (mSearch.running()) { mSearch.cancel(); return; }
-          mSearch.start(P().livePatch(), 0.0);
-          // Show the page that reports it, or the button looks like it did
-          // nothing at all.
-          if (auto* t = g->GetControlWithTag(kCtrlTagTabBar))
-            t->As<TabBarControl>()->Select(2);
-        }, "Find Similar", style));
-    g->AttachControl(new IVButtonControl(
-        btns.GetGridCell(3, 1, 4).GetPadded(-3.f),
-        [this](IControl*) { P().pool.allNotesOff(); }, "Panic", style));
+    // A disabled vector control is greyed by SUBTRACTING 64 from each channel,
+    // which on this dark palette lands on black and reads as a broken button
+    // rather than an unavailable one. Starting 64 higher puts the disabled
+    // state exactly where the other buttons' normal state sits.
+    const IVStyle stepStyle = style.WithColor(kFG, IColor(255, 84, 92, 106));
+
+    const IRECT btns = top.GetReducedFromLeft(188.f).GetFromLeft(230.f);
+    const auto btn = [&](int col, int row, const char* label, const IVStyle& st,
+                         std::function<void()> fn, int tag = kNoTag) {
+      const IRECT cell(btns.L + btns.W() / 3.f * float(col),
+                       btns.T + btns.H() / 2.f * float(row),
+                       btns.L + btns.W() / 3.f * float(col + 1),
+                       btns.T + btns.H() / 2.f * float(row + 1));
+      g->AttachControl(new IVButtonControl(cell.GetPadded(-3.f), Click(std::move(fn)),
+                                           label, st), tag);
+    };
+
+    btn(0, 0, "Random", style, [this] { RollRandomSeed(); });
+    btn(1, 0, "Back", stepStyle, [this] { GoBack(); }, kCtrlTagBack);
+    btn(2, 0, "Next", stepStyle, [this] { GoForward(); }, kCtrlTagNext);
+    btn(0, 1, "Find Similar", style, [this, g] {
+      // Idempotent while a search is running: the Stop button on the Search
+      // tab is what stops one. Pressing this again used to cancel, so the
+      // obvious "did I actually start it?" second press threw the search away.
+      if (!mSearch.running()) StartSimilaritySearch(0.0);
+      // Show the page that reports it either way, or the button looks like it
+      // did nothing at all.
+      if (auto* t = g->GetControlWithTag(kCtrlTagTabBar))
+        t->As<TabBarControl>()->Select(2);
+    });
+    btn(1, 1, "Panic", style, [this] { P().pool.allNotesOff(); });
+    btn(2, 1, "Stop Search", style, [this] { CancelSearches(); });
+
+    g->AttachControl(new seedlathe::TypeGridControl(
+        top.GetReducedFromLeft(426.f).GetFromLeft(240.f), sl::kTypeFilter));
 
     {
-      const IRECT strip = top.GetReducedFromLeft(560.f).GetFromLeft(314.f);
+      const IRECT strip = top.GetReducedFromLeft(674.f).GetFromLeft(260.f);
       auto* parts = new PartStripControl(
           strip, sl::kNumParts,
           [this](int i) { return mParts[static_cast<size_t>(i)].allocated; },
@@ -183,13 +233,17 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
       g->AttachControl(parts, kCtrlTagPartStrip);
     }
 
-    const IRECT knobs = top.GetFromRight(280.f);
-    g->AttachControl(new IVKnobControl(knobs.GetGridCell(0, 1, 3).GetPadded(-4.f),
+    // Cutoff and Resonance sit beside Volume and Octave because they belong to
+    // the same class of control: things you move with a chord held down.
+    const IRECT knobs = top.GetFromRight(300.f);
+    g->AttachControl(new IVKnobControl(knobs.GetGridCell(0, 1, 4).GetPadded(-4.f),
                                        sl::kVolume, "Volume", style));
-    g->AttachControl(new IVKnobControl(knobs.GetGridCell(1, 1, 3).GetPadded(-4.f),
+    g->AttachControl(new IVKnobControl(knobs.GetGridCell(1, 1, 4).GetPadded(-4.f),
                                        sl::kOctave, "Octave", style));
-    g->AttachControl(new IVKnobControl(knobs.GetGridCell(2, 1, 3).GetPadded(-4.f),
-                                       sl::kTypeFilter, "Roll type", style));
+    g->AttachControl(new IVKnobControl(knobs.GetGridCell(2, 1, 4).GetPadded(-4.f),
+                                       sl::kFilterCutoff, "Cutoff", style));
+    g->AttachControl(new IVKnobControl(knobs.GetGridCell(3, 1, 4).GetPadded(-4.f),
+                                       sl::kFilterRes, "Resonance", style));
 
     // ---- tabs ----------------------------------------------------------
     // iPlug2's IVTabbedPagesControl keys its pages on const char*, so the tab
@@ -199,77 +253,33 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
     const IRECT page = mid.GetReducedFromTop(36.f);
 
     g->AttachControl(new TabBarControl(
-        tabBar, {"Instrument", "Presets", "Search", "Sample", "Design"},
+        tabBar, {"Instrument", "Presets", "Search", "Sample", "Design", "Settings"},
         [g](int index) {
-          static const char* kGroups[] = {"instrument", "presets", "search", "sample", "design"};
-          for (int i = 0; i < 5; ++i)
+          static const char* kGroups[] = {"instrument", "presets", "search",
+                                          "sample", "design", "settings"};
+          for (int i = 0; i < 6; ++i)
             g->ForControlInGroup(kGroups[i], [i, index](IControl* c) { c->Hide(i != index); });
         }), kCtrlTagTabBar);
 
     // -- Instrument
     //
-    // The overview page: what is loaded, the two controls that reach a
-    // sounding note, the output, and every component the seed produced. The
-    // Design tab edits one oscillator at a time; this answers "what IS this"
-    // without a single click.
+    // The overview page: what is loaded, the output, and every component the
+    // seed produced. The Design tab edits one oscillator at a time; this
+    // answers "what IS this" without a single click.
     g->AttachControl(new ITextControl(page.GetFromTop(18.f), "Loaded instrument",
                                       IText(12.f, kDim)), kNoTag, "instrument");
     g->AttachControl(new ITextControl(page.GetReducedFromTop(18.f).GetFromTop(26.f), "",
                                       IText(19.f, kTextCol)), kCtrlTagTypeLabel, "instrument");
-    {
-      const IRECT engineRow = page.GetReducedFromTop(48.f).GetFromTop(56.f);
-
-      // The modulation pair comes first: these are the only parameters that
-      // reach a note already sounding, so they are the ones a player reaches
-      // for while holding a chord.
-      g->AttachControl(new IVKnobControl(engineRow.GetFromLeft(96.f).GetVPadded(-2.f),
-                                         sl::kFilterCutoff, "Cutoff", style),
-                       kNoTag, "instrument");
-      g->AttachControl(new IVKnobControl(
-          engineRow.GetReducedFromLeft(96.f).GetFromLeft(96.f).GetVPadded(-2.f),
-          sl::kFilterRes, "Resonance", style), kNoTag, "instrument");
-
-      g->AttachControl(new IVTabSwitchControl(
-          engineRow.GetReducedFromLeft(206.f).GetFromLeft(190.f).GetVPadded(-10.f),
-          sl::kOversample, {}, "Oversampling", style), kNoTag, "instrument");
-      g->AttachControl(new IVSliderControl(
-          engineRow.GetReducedFromLeft(406.f).GetFromLeft(150.f).GetVPadded(-10.f),
-          sl::kVoices, "Voices", style, false, EDirection::Horizontal),
-          kNoTag, "instrument");
-      g->AttachControl(new IVToggleControl(
-          engineRow.GetReducedFromLeft(566.f).GetFromLeft(120.f).GetVPadded(-10.f),
-          sl::kMultitimbral, "Multitimbral", style, "Off", "On"),
-          kNoTag, "instrument");
-      // One control per line: ITextControl draws its string with nvgText,
-      // which neither wraps nor honours a newline, so a paragraph here just
-      // runs off the edge of the window.
-      {
-        const IRECT hint = engineRow.GetReducedFromLeft(700.f);
-        const IText hintText(11.f, IColor(255, 110, 118, 130), nullptr, EAlign::Near);
-        g->AttachControl(new ITextControl(
-            hint.GetFromTop(16.f),
-            "Cutoff and Resonance reach notes that are already sounding.",
-            hintText), kNoTag, "instrument");
-        g->AttachControl(new ITextControl(
-            hint.GetReducedFromTop(18.f).GetFromTop(16.f),
-            "Oversampling changes the sound: zyn runs at the host rate.",
-            hintText), kNoTag, "instrument");
-        g->AttachControl(new ITextControl(
-            hint.GetReducedFromTop(36.f).GetFromTop(16.f),
-            "Multitimbral gives each MIDI channel its own part.",
-            hintText), kNoTag, "instrument");
-      }
-    }
     // The scope draws its trace in kFG and its centre line in kSH, both of
     // which the dark palette sets to near-invisible greys. It looked like a
     // dead control until those two were given the accent instead.
     g->AttachControl(new IVScopeControl<1, 128>(
-        page.GetReducedFromTop(108.f).GetFromTop(68.f), "Output",
+        page.GetReducedFromTop(50.f).GetFromTop(90.f), "Output",
         style.WithColor(kFG, kAccent).WithColor(kSH, IColor(255, 58, 65, 78))),
         kCtrlTagScope, "instrument");
     {
       auto* view = new seedlathe::InstrumentViewControl(
-          page.GetReducedFromTop(180.f),
+          page.GetReducedFromTop(148.f),
           [this]() -> const sl::Instrument& { return P().edit; });
       g->AttachControl(view, kCtrlTagComponents, "instrument");
       // Synced with the designer, so switching seed, preset or part repaints
@@ -281,15 +291,15 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
     {
       const IRECT bar = page.GetFromTop(30.f);
       g->AttachControl(new IVButtonControl(bar.GetFromLeft(150.f).GetPadded(-3.f),
-          [this](IControl*) { PromptSavePreset(); }, "Save current...", style),
+          Click([this] { PromptSavePreset(); }), "Save current...", style),
           kNoTag, "presets");
       g->AttachControl(new IVButtonControl(
           bar.GetReducedFromLeft(150.f).GetFromLeft(110.f).GetPadded(-3.f),
-          [this](IControl*) { PromptRenamePreset(); }, "Rename...", style),
+          Click([this] { PromptRenamePreset(); }), "Rename...", style),
           kNoTag, "presets");
       g->AttachControl(new IVButtonControl(
           bar.GetReducedFromLeft(260.f).GetFromLeft(110.f).GetPadded(-3.f),
-          [this](IControl*) { DeleteSelectedPreset(); }, "Delete", style),
+          Click([this] { DeleteSelectedPreset(); }), "Delete", style),
           kNoTag, "presets");
       g->AttachControl(new ITextControl(bar.GetReducedFromLeft(380.f),
           "", IText(12.f, kDim, nullptr, EAlign::Near)),
@@ -309,17 +319,16 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
         IText(12.f, kDim)), kNoTag, "search");
     {
       const IRECT row = page.GetReducedFromTop(50.f).GetFromTop(36.f).GetFromLeft(560.f);
+      // Starting is idempotent while one is running -- a second press must not
+      // throw away the progress the first made.
       g->AttachControl(new IVButtonControl(row.GetGridCell(0, 1, 3).GetPadded(-4.f),
-          [this](IControl*) {
-            mSearch.start(P().livePatch(), 0.0);
-          }, "Search", style), kNoTag, "search");
+          Click([this] { if (!mSearch.running()) StartSimilaritySearch(0.0); }),
+          "Search", style), kNoTag, "search");
       g->AttachControl(new IVButtonControl(row.GetGridCell(1, 1, 3).GetPadded(-4.f),
-          [this](IControl*) {
-            mSearch.start(P().livePatch(),
-                          mSearchThreshold);
-          }, "Search until 90%", style), kNoTag, "search");
+          Click([this] { if (!mSearch.running()) StartSimilaritySearch(mSearchThreshold); }),
+          "Search until 90%", style), kNoTag, "search");
       g->AttachControl(new IVButtonControl(row.GetGridCell(2, 1, 3).GetPadded(-4.f),
-          [this](IControl*) { mSearch.cancel(); }, "Stop", style), kNoTag, "search");
+          Click([this] { CancelSearches(); }), "Stop", style), kNoTag, "search");
       g->AttachControl(new ITextControl(page.GetReducedFromTop(94.f).GetFromTop(28.f),
           "Idle", IText(15.f, kTextCol)), kCtrlTagSearchStatus, "search");
 
@@ -329,7 +338,7 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
       g->AttachControl(new ITextControl(page.GetReducedFromTop(126.f).GetFromTop(18.f),
           "Best matches -- click to load",
           IText(11.f, kDim, nullptr, EAlign::Near)), kNoTag, "search");
-      g->AttachControl(new ListControl(page.GetReducedFromTop(146.f).GetFromLeft(560.f),
+      g->AttachControl(new ListControl(page.GetReducedFromTop(146.f),
           [this](int payload) { SetSeed(static_cast<uint32_t>(payload)); }),
           kCtrlTagResultList, "search");
     }
@@ -340,12 +349,21 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
     // -- Design
     BuildDesigner(g, page, style);
 
+    // -- Settings
+    BuildSettingsPage(g, page, style);
+
     // Everything but the first page starts hidden.
-    for (const char* grp : {"presets", "search", "sample", "design"})
+    for (const char* grp : {"presets", "search", "sample", "design", "settings"})
       g->ForControlInGroup(grp, [](IControl* c) { c->Hide(true); });
 
     // ---- keyboard ------------------------------------------------------
-    g->AttachControl(new IVKeyboardControl(keys), kCtrlTagKeyboard);
+    //
+    // Four octaves rather than iPlug2's default two. The width is fixed, so
+    // the default put 25 keys across the whole window and every key was wider
+    // than a real one; C2 to C6 is a keyboard you can actually play a bass
+    // line and a melody on without reaching for the octave knob.
+    g->AttachControl(new IVKeyboardControl(keys, kKeyboardLowNote, kKeyboardHighNote),
+                     kCtrlTagKeyboard);
 
     RefreshPresetList();
     RefreshSeedDisplay();
@@ -475,11 +493,11 @@ void Seedlathe::BuildDesigner(IGraphics* g, const IRECT& page, const IVStyle& st
 
   const IRECT countRow = selRow.GetReducedFromLeft(412.f).GetFromLeft(200.f);
   g->AttachControl(new IVButtonControl(countRow.GetFromLeft(30.f),
-      [this](IControl*) { SetOscCount(P().edit.oscCount - 1); }, "-", style), kNoTag, "design");
+      Click([this] { SetOscCount(P().edit.oscCount - 1); }), "-", style), kNoTag, "design");
   g->AttachControl(new ITextControl(countRow.GetReducedFromLeft(34.f).GetFromLeft(130.f), "",
       IText(11.f, IColor(255, 214, 221, 230))), kCtrlTagOscCount, "design");
   g->AttachControl(new IVButtonControl(countRow.GetFromRight(30.f),
-      [this](IControl*) { SetOscCount(P().edit.oscCount + 1); }, "+", style), kNoTag, "design");
+      Click([this] { SetOscCount(P().edit.oscCount + 1); }), "+", style), kNoTag, "design");
 
   // Four columns. The instrument carries far more surface than a knob-per-field
   // layout could hold at this window size, so it is grouped by what a sound
@@ -642,12 +660,12 @@ void Seedlathe::BuildDesigner(IGraphics* g, const IRECT& page, const IVStyle& st
     const IRECT q(c.L, c.T + 300.f, c.R, c.T + 392.f);
     panel(q, "PATCH");
     g->AttachControl(new IVButtonControl(rowIn(q, 18.f, 22.f),
-        [this](IControl*) {
+        Click([this] {
           if (auto* ui = GetUI())
             ui->SetTextInClipboard(sl::instrumentToJson(P().edit).dump(2).c_str());
-        }, "Copy JSON", style), kNoTag, "design");
+        }), "Copy JSON", style), kNoTag, "design");
     g->AttachControl(new IVButtonControl(rowIn(q, 44.f, 22.f),
-        [this](IControl*) {
+        Click([this] {
           auto* ui = GetUI();
           if (!ui) return;
           WDL_String text;
@@ -665,9 +683,9 @@ void Seedlathe::BuildDesigner(IGraphics* g, const IRECT& page, const IVStyle& st
           P().designOsc = 0;
           PushEdit();
           SyncDesigner();
-        }, "Paste JSON", style), kNoTag, "design");
+        }), "Paste JSON", style), kNoTag, "design");
     g->AttachControl(new IVButtonControl(rowIn(q, 70.f, 22.f),
-        [this](IControl*) { PushHistory(); RebuildInstrument(true); },
+        Click([this] { PushHistory(); RebuildInstrument(true); }),
         "Revert to seed", style), kNoTag, "design");
   }
 }
@@ -972,6 +990,124 @@ void Seedlathe::DeleteSelectedPreset()
 
 #endif // IPLUG_EDITOR
 
+void Seedlathe::BuildSettingsPage(IGraphics* g, const IRECT& page, const IVStyle& style)
+{
+  const IText body(12.f, IColor(255, 130, 140, 155), nullptr, EAlign::Near);
+  const IText heading(13.f, kTextCol, nullptr, EAlign::Near);
+
+  // Each setting gets a heading of its own here, so the controls must not draw
+  // their built-in labels as well -- an empty label string falls back to the
+  // parameter name, which is where the doubled "Oversampling" came from.
+  const IVStyle bare = style.WithShowLabel(false);
+
+  const auto note = [&](const IRECT& r, const char* text) {
+    g->AttachControl(new ITextControl(r, text, body), kNoTag, "settings");
+  };
+
+  // Three columns: what the engine costs, how it listens, and what it is.
+  const float colW = (page.W() - 24.f) / 3.f;
+  const auto col = [&](int i) {
+    const float l = page.L + (colW + 12.f) * float(i);
+    return IRECT(l, page.T, l + colW, page.B);
+  };
+
+  // ---- engine -------------------------------------------------------------
+  {
+    const IRECT c = col(0);
+    const IRECT p(c.L, c.T, c.R, c.B);
+    g->AttachControl(new PanelControl(p, "ENGINE"), kNoTag, "settings");
+    const IRECT in = p.GetHPadded(-12.f);
+
+    g->AttachControl(new ITextControl(IRECT(in.L, p.T + 24.f, in.R, p.T + 40.f),
+                                      "Oversampling", heading), kNoTag, "settings");
+    g->AttachControl(new IVTabSwitchControl(
+        IRECT(in.L, p.T + 42.f, in.L + 200.f, p.T + 68.f), sl::kOversample,
+        {}, "", bare), kNoTag, "settings");
+    note(IRECT(in.L, p.T + 72.f, in.R, p.T + 88.f),
+         "Renders the engine at 2x or 4x the host rate.");
+    note(IRECT(in.L, p.T + 88.f, in.R, p.T + 104.f),
+         "It CHANGES the sound rather than only cleaning it");
+    note(IRECT(in.L, p.T + 104.f, in.R, p.T + 120.f),
+         "up: a seed is defined at the host rate, so band");
+    note(IRECT(in.L, p.T + 120.f, in.R, p.T + 136.f),
+         "limiting and filter timing both shift. Off is the");
+    note(IRECT(in.L, p.T + 136.f, in.R, p.T + 152.f),
+         "reference; 2x and 4x are a preference.");
+
+    g->AttachControl(new ITextControl(IRECT(in.L, p.T + 164.f, in.R, p.T + 180.f),
+                                      "Voices", heading), kNoTag, "settings");
+    g->AttachControl(new IVSliderControl(
+        IRECT(in.L, p.T + 182.f, in.R, p.T + 208.f), sl::kVoices, "", bare,
+        false, EDirection::Horizontal), kNoTag, "settings");
+    note(IRECT(in.L, p.T + 212.f, in.R, p.T + 228.f),
+         "Polyphony ceiling. The quietest voice is stolen");
+    note(IRECT(in.L, p.T + 228.f, in.R, p.T + 244.f),
+         "when they run out.");
+  }
+
+  // ---- MIDI ---------------------------------------------------------------
+  {
+    const IRECT c = col(1);
+    const IRECT p(c.L, c.T, c.R, c.B);
+    g->AttachControl(new PanelControl(p, "MIDI"), kNoTag, "settings");
+    const IRECT in = p.GetHPadded(-12.f);
+
+    g->AttachControl(new ITextControl(IRECT(in.L, p.T + 24.f, in.R, p.T + 40.f),
+                                      "Multitimbral", heading), kNoTag, "settings");
+    g->AttachControl(new IVToggleControl(
+        IRECT(in.L, p.T + 42.f, in.L + 130.f, p.T + 68.f), sl::kMultitimbral,
+        "", bare, "Off", "On"), kNoTag, "settings");
+    note(IRECT(in.L, p.T + 72.f, in.R, p.T + 88.f),
+         "Off: every channel plays part 1, which is what a");
+    note(IRECT(in.L, p.T + 88.f, in.R, p.T + 104.f),
+         "host sending on channel 1 expects.");
+    note(IRECT(in.L, p.T + 108.f, in.R, p.T + 124.f),
+         "On: the channel selects the part, and the strip in");
+    note(IRECT(in.L, p.T + 124.f, in.R, p.T + 140.f),
+         "the header chooses which one you are editing.");
+    note(IRECT(in.L, p.T + 144.f, in.R, p.T + 160.f),
+         "Each part is a whole engine -- delay feedback and");
+    note(IRECT(in.L, p.T + 160.f, in.R, p.T + 176.f),
+         "reverb tails cannot be shared between instruments");
+    note(IRECT(in.L, p.T + 176.f, in.R, p.T + 192.f),
+         "-- so parts are allocated as you address them.");
+    note(IRECT(in.L, p.T + 200.f, in.R, p.T + 216.f),
+         "Pitch bend, sustain (CC 64) and program change are");
+    note(IRECT(in.L, p.T + 216.f, in.R, p.T + 232.f),
+         "handled per part.");
+  }
+
+  // ---- about --------------------------------------------------------------
+  {
+    const IRECT c = col(2);
+    const IRECT p(c.L, c.T, c.R, c.B);
+    g->AttachControl(new PanelControl(p, "ABOUT"), kNoTag, "settings");
+    const IRECT in = p.GetHPadded(-12.f);
+
+    g->AttachControl(new ITextControl(
+        IRECT(in.L, p.T + 24.f, in.R, p.T + 48.f), PLUG_NAME,
+        IText(20.f, kTextCol, nullptr, EAlign::Near)), kNoTag, "settings");
+    note(IRECT(in.L, p.T + 50.f, in.R, p.T + 66.f), "Version " PLUG_VERSION_STR);
+    note(IRECT(in.L, p.T + 76.f, in.R, p.T + 92.f),
+         "A seed-driven procedural synthesizer. Every");
+    note(IRECT(in.L, p.T + 92.f, in.R, p.T + 108.f),
+         "instrument comes from one 32-bit integer, and the");
+    note(IRECT(in.L, p.T + 108.f, in.R, p.T + 124.f),
+         "same seed sounds the same here as it does in");
+    note(IRECT(in.L, p.T + 124.f, in.R, p.T + 140.f),
+         "zyn.js, the library it is a port of.");
+
+    g->AttachControl(new IVButtonControl(
+        IRECT(in.L, p.T + 154.f, in.L + 150.f, p.T + 180.f),
+        Click([this] { if (auto* ui = GetUI()) ui->OpenURL(kSeedlatheUrl); }),
+        "Seedlathe on GitHub", style), kNoTag, "settings");
+    g->AttachControl(new IVButtonControl(
+        IRECT(in.L, p.T + 186.f, in.L + 150.f, p.T + 212.f),
+        Click([this] { if (auto* ui = GetUI()) ui->OpenURL(kZynUrl); }),
+        "zyn.js on GitHub", style), kNoTag, "settings");
+  }
+}
+
 void Seedlathe::BuildSamplePage(IGraphics* g, const IRECT& page, const IVStyle& style)
 {
   g->AttachControl(new ITextControl(page.GetFromTop(52.f),
@@ -982,25 +1118,30 @@ void Seedlathe::BuildSamplePage(IGraphics* g, const IRECT& page, const IVStyle& 
 
   const IRECT loadRow = page.GetReducedFromTop(56.f).GetFromTop(34.f).GetFromLeft(560.f);
   g->AttachControl(new IVButtonControl(loadRow.GetFromLeft(180.f).GetPadded(-4.f),
-      [this](IControl*) { LoadSampleTarget(); }, "Load sample...", style),
+      Click([this] { LoadSampleTarget(); }), "Load sample...", style),
       kNoTag, "sample");
   g->AttachControl(new ITextControl(loadRow.GetReducedFromLeft(190.f),
       "No sample loaded", IText(13.f, kTextCol, nullptr, EAlign::Near)),
       kCtrlTagSampleInfo, "sample");
 
+  // Starting is idempotent while one is running, so a second press cannot
+  // discard the candidates the first has already rendered.
+  const auto startSample = [this](double threshold) {
+    if (mSampleSearch.running()) return;
+    mSampleSearch.start(GetParam(sl::kTypeFilter)->Int(), threshold);
+    mAdoptSampleSearch = true;
+  };
+
   const IRECT row = page.GetReducedFromTop(100.f).GetFromTop(36.f).GetFromLeft(560.f);
   g->AttachControl(new IVButtonControl(row.GetGridCell(0, 1, 3).GetPadded(-4.f),
-      [this](IControl*) {
-        mSampleSearch.start(GetParam(sl::kTypeFilter)->Int(), 0.0);
-      }, "Search", style), kNoTag, "sample");
+      Click([startSample] { startSample(0.0); }), "Search", style), kNoTag, "sample");
   g->AttachControl(new IVButtonControl(row.GetGridCell(1, 1, 3).GetPadded(-4.f),
-      [this](IControl*) {
-        // A lower bar than the parameter-space search: an unrelated recording
-        // and a seed will never agree the way two seeds can.
-        mSampleSearch.start(GetParam(sl::kTypeFilter)->Int(), 85.0);
-      }, "Search until 85%", style), kNoTag, "sample");
+      // A lower bar than the parameter-space search: an unrelated recording
+      // and a seed will never agree the way two seeds can.
+      Click([startSample] { startSample(85.0); }), "Search until 85%", style),
+      kNoTag, "sample");
   g->AttachControl(new IVButtonControl(row.GetGridCell(2, 1, 3).GetPadded(-4.f),
-      [this](IControl*) { mSampleSearch.cancel(); }, "Stop", style), kNoTag, "sample");
+      Click([this] { CancelSearches(); }), "Stop", style), kNoTag, "sample");
 
   g->AttachControl(new ITextControl(page.GetReducedFromTop(144.f).GetFromTop(28.f),
       "Idle", IText(15.f, kTextCol)), kCtrlTagSampleStatus, "sample");
@@ -1013,7 +1154,7 @@ void Seedlathe::BuildSamplePage(IGraphics* g, const IRECT& page, const IVStyle& 
 
   // The runners-up, not just the winner.
   g->AttachControl(new ListControl(
-      page.GetReducedFromTop(200.f).GetFromTop(190.f).GetFromLeft(560.f),
+      page.GetReducedFromTop(200.f).GetFromTop(260.f),
       [this](int payload) { SetSeed(static_cast<uint32_t>(payload)); }),
       kCtrlTagSampleResults, "sample");
 
@@ -1024,7 +1165,7 @@ void Seedlathe::BuildSamplePage(IGraphics* g, const IRECT& page, const IVStyle& 
       IText(12.f, kDim)), kNoTag, "sample");
   g->AttachControl(new IVButtonControl(
       exportTop.GetReducedFromTop(28.f).GetFromTop(34.f).GetFromLeft(180.f).GetPadded(-4.f),
-      [this](IControl*) { ExportWav(); }, "Export WAV...", style), kNoTag, "sample");
+      Click([this] { ExportWav(); }), "Export WAV...", style), kNoTag, "sample");
   g->AttachControl(new ITextControl(
       exportTop.GetReducedFromTop(28.f).GetFromTop(34.f).GetReducedFromLeft(190.f),
       "", IText(13.f, kTextCol, nullptr, EAlign::Near)), kCtrlTagExportStatus, "sample");
@@ -1155,14 +1296,20 @@ void Seedlathe::PushHistory()
   part.pushHistory(s);
 }
 
-void Seedlathe::GoBack()
+seedlathe::Snapshot Seedlathe::CurrentSnapshot() const
+{
+  const seedlathe::Part& part = P();
+  seedlathe::Snapshot s;
+  s.seed = part.seed;
+  s.inst = part.edit;
+  s.edited = part.edited;
+  s.octave = GetParam(sl::kOctave)->Int();
+  return s;
+}
+
+void Seedlathe::ApplySnapshot(const seedlathe::Snapshot& s)
 {
   seedlathe::Part& part = P();
-  if (part.history.empty()) return;
-
-  const seedlathe::Snapshot s = part.history.back();
-  part.history.pop_back();
-
   mRestoring = true;
 
   // The seed parameters are the authoritative seed for part 1, so they have to
@@ -1190,13 +1337,54 @@ void Seedlathe::GoBack()
 
   mRestoring = false;
 
+  // Stepping through history is the user choosing a sound, so a search still
+  // running must not overwrite it when it ends.
+  mAdoptSearch = false;
+  mAdoptSampleSearch = false;
+
   SyncDesigner();
   RefreshSeedDisplay();
+}
+
+void Seedlathe::GoBack()
+{
+  seedlathe::Snapshot restored;
+  if (!P().stepBack(CurrentSnapshot(), restored)) return;
+  ApplySnapshot(restored);
+}
+
+void Seedlathe::GoForward()
+{
+  seedlathe::Snapshot restored;
+  if (!P().stepForward(CurrentSnapshot(), restored)) return;
+  ApplySnapshot(restored);
+}
+
+void Seedlathe::StartSimilaritySearch(double threshold)
+{
+  mSearch.start(P().livePatch(), threshold);
+  mAdoptSearch = true;
+}
+
+void Seedlathe::CancelSearches()
+{
+  mSearch.cancel();
+  mSampleSearch.cancel();
+  mAdoptSearch = false;
+  mAdoptSampleSearch = false;
 }
 
 void Seedlathe::SetSeed(uint32_t seed)
 {
   PushHistory();
+
+  // The user has chosen a sound. A search that finishes after this must not
+  // reach back and replace it -- which is exactly what rolling the dice
+  // mid-search used to do a few seconds later.
+  if (!mRestoring) {
+    mAdoptSearch = false;
+    mAdoptSampleSearch = false;
+  }
 
   seedlathe::Part& part = P();
   if (mEditPart == 0) {
@@ -1217,6 +1405,12 @@ void Seedlathe::SetSeed(uint32_t seed)
 
 void Seedlathe::RollRandomSeed()
 {
+  // Rolling the dice abandons the hunt. A search is a search for something
+  // LIKE the current instrument, so the moment that instrument is thrown away
+  // the search is answering a question nobody is asking any more -- and it
+  // would go on burning a thread to do it.
+  CancelSearches();
+
   // xorshift: a roll only has to feel random, and this keeps no state worth
   // persisting.
   mRollState ^= mRollState << 13;
@@ -1250,6 +1444,8 @@ void Seedlathe::RefreshSeedDisplay()
   // empties moves everything beside it.
   if (auto* c = ui->GetControlWithTag(kCtrlTagBack))
     c->SetDisabled(!CanGoBack());
+  if (auto* c = ui->GetControlWithTag(kCtrlTagNext))
+    c->SetDisabled(!CanGoForward());
 
   if (auto* c = ui->GetControlWithTag(kCtrlTagPartStrip)) {
     auto* strip = c->As<PartStripControl>();
@@ -1559,9 +1755,11 @@ void Seedlathe::OnIdle()
     }
   }
 
-  // Adopt the winner once, when the search finishes.
-  if (mSearchWasRunning && !running && best.found)
+  // Adopt the winner once, when the search finishes -- and only if the user
+  // has not picked a sound of their own since it started.
+  if (mSearchWasRunning && !running && best.found && mAdoptSearch)
     SetSeed(best.seed);
+  if (!running) mAdoptSearch = false;
 
   RefreshResultList(kCtrlTagResultList, mSearch.top());
 
@@ -1585,8 +1783,10 @@ void Seedlathe::OnIdle()
     }
   }
 
-  if (mSampleSearchWasRunning && !sampleRunning && sampleBest.found)
+  if (mSampleSearchWasRunning && !sampleRunning && sampleBest.found &&
+      mAdoptSampleSearch)
     SetSeed(sampleBest.seed);
+  if (!sampleRunning) mAdoptSampleSearch = false;
 
   RefreshResultList(kCtrlTagSampleResults, mSampleSearch.top());
 

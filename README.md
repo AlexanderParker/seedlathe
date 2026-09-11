@@ -30,13 +30,16 @@ same here as it does on the zyn demo page — enforced by automated tests, not b
 - **Instrument overview.** The Instrument tab draws every oscillator the seed
   produced at once — envelopes, what is switched on, the FM matrix — read-only, for
   answering "what is this" without clicking through the designer one slot at a time.
-- **Undo.** Back steps through the sounds visited on the current part: seeds, presets,
-  search results, pasted patches and reverts, with the designer edits each carried.
+- **Undo.** Back and Next step through the sounds visited on the current part: seeds,
+  presets, search results, pasted patches and reverts, with the designer edits each
+  carried.
 - **Designer.** Edit any generated instrument directly: five oscillators, draggable
   envelopes, three LFOs, FM, pitch envelope, distortion, per-oscillator delay and
   reverb, and the 5×5 FM matrix. Patches copy and paste as zyn's own JSON.
 - **Presets.** 115 factory presets from the demo page, plus your own bank.
 - **Multitimbral.** Sixteen parts, one per MIDI channel, allocated as you use them.
+- **Settings.** Engine and MIDI options live on their own tab, so the header holds only
+  what you reach for while playing.
 - **Oversampling.** 2× or 4×, off by default — it is a deviation from zyn, which runs
   its graph at the host rate.
 - **Export.** Render the current instrument to a 32-bit float stereo WAV.

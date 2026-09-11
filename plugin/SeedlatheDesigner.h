@@ -717,7 +717,13 @@ private:
         g.DrawText(IText(9.f, dsn::kLabel, nullptr, EAlign::Near), buf,
                    inner.GetReducedFromTop(16.f).GetFromTop(14.f));
 
-        const float envH = 64.f;
+        // The badges are anchored to the bottom and the envelopes take what is
+        // left, so the card fills whatever height the page gives it instead of
+        // bunching at the top with a void beneath.
+        const float rowH = 12.f;
+        const float badgeH = rowH * 8.f;
+        const float envH = std::max(30.f, (c.H() - 32.f - badgeH - 8.f) / 3.f);
+
         float y = 32.f;
         Env(g, IRECT(inner.L, c.T + y, inner.R, c.T + y + envH), "GAIN", o.adsrGain);
         y += envH + 2.f;
@@ -726,7 +732,7 @@ private:
         y += envH + 2.f;
         Env(g, IRECT(inner.L, c.T + y, inner.R, c.T + y + envH), "RESONANCE x 30 dB",
             o.adsrFilterQ);
-        y += envH + 4.f;
+        y = c.H() - badgeH - 4.f;
 
         // What is switched on, in the order the Design tab lists it.
         struct Row { bool on; const char* name; char value[40]; };
@@ -782,7 +788,6 @@ private:
                           o.verb.duration, o.verb.decay);
         ++k;
 
-        const float rowH = 12.f;
         for (int r = 0; r < k; ++r) {
             const IRECT b(inner.L, c.T + y + rowH * float(r),
                           inner.R, c.T + y + rowH * float(r + 1) - 1.f);
