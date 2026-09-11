@@ -27,10 +27,19 @@
 
 const int kNumPresets = 1;
 
-// Bumped whenever the layout after the parameters changes. A mis-read there
-// loads the wrong instrument silently rather than failing, so the version is
-// checked before anything is trusted.
-constexpr int kStateVersion = 2;
+// Bumped whenever the chunk layout changes, INCLUDING the parameter list. A
+// mis-read loads the wrong instrument silently rather than failing, so both
+// of these are written first and checked before anything else is trusted.
+//
+// The magic word earns its place: the parameter block is a bare sequence of
+// doubles with no count, so a chunk from a build with fewer parameters is not
+// merely short -- UnserializeParams reads past its end into whatever followed
+// and sets the extra parameters from it. Adding the two modulation parameters
+// did exactly that to an existing session, which came back with a -30 dB
+// resonance offset, 2x oversampling and multitimbral on. Nothing after the
+// parameters can catch that; only a header before them can.
+constexpr uint32_t kStateMagic = 0x414C4453u;   // 'SDLA'
+constexpr int kStateVersion = 3;
 
 enum EControlTags
 {

@@ -1290,13 +1290,16 @@ void Seedlathe::OnReset()
 
 bool Seedlathe::SerializeState(IByteChunk& chunk) const
 {
+  // Header first, parameters second. See kStateMagic for why the order is
+  // load-bearing rather than tidy.
+  const uint32_t magic = kStateMagic;
+  const int version = kStateVersion;
+  chunk.Put(&magic);
+  chunk.Put(&version);
+
   if (!SerializeParams(chunk))
     return false;
 
-  // Versioned, because the shape of what follows has already changed once and
-  // a mis-read here silently loads the wrong instrument rather than failing.
-  const int version = kStateVersion;
-  chunk.Put(&version);
   chunk.Put(&mEditPart);
 
   for (const auto& part : mParts) {
@@ -1316,20 +1319,27 @@ bool Seedlathe::SerializeState(IByteChunk& chunk) const
 
 int Seedlathe::UnserializeState(const IByteChunk& chunk, int startPos)
 {
+  // Refuse before touching a single parameter. A chunk that fails this is
+  // from a build whose layout differed, and reading it would not produce an
+  // approximation of the saved session -- it would produce a different one,
+  // silently, with plausible-looking values.
+  uint32_t magic = 0;
+  int version = 0;
+  int pos = chunk.Get(&magic, startPos);
+  if (pos < 0 || magic != kStateMagic) return startPos;
+  pos = chunk.Get(&version, pos);
+  if (pos < 0 || version != kStateVersion) return startPos;
+
   // This regenerates part 1 from the restored seed as a side effect of
   // OnParamChange, which is exactly the state an unedited patch wants.
-  int pos = UnserializeParams(chunk, startPos);
-
-  int version = 0;
-  int next = chunk.Get(&version, pos);
-  if (next < 0 || version != kStateVersion)
-    return pos;   // state from a build whose chunk layout differed
-  pos = next;
+  pos = UnserializeParams(chunk, pos);
+  if (pos < 0) return startPos;
 
   int editPart = 0;
   pos = chunk.Get(&editPart, pos);
   if (pos < 0) return startPos;
 
+  int next = 0;
   for (int i = 0; i < sl::kNumParts; ++i) {
     int used = 0;
     next = chunk.Get(&used, pos);
