@@ -3,7 +3,7 @@
 #include "IControl.h"
 #include "IControls.h"
 #include "SeedlatheParams.h"
-#include "UserPresets.h"
+#include "PresetLibrary.h"
 #include "sl/FactoryPresets.h"
 
 #include <algorithm>
@@ -68,6 +68,55 @@ inline void OpenTextEntry(IControl& control, const IText& text,
     sChained = current;
     SetWindowLongPtrW(edit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&Quiet::Proc));
 #endif
+}
+
+// What the browser's two filters call "no filter at all", and the name the
+// compiled-in bank goes by. Shared so the label the user sees and the value
+// the code compares against cannot drift apart.
+inline constexpr const char* kAllPacks = "All packs";
+inline constexpr const char* kAllCategories = "All categories";
+inline constexpr const char* kBuiltInPackName = "Factory";
+
+// Save and Rename both take one line of text rather than three prompts.
+//
+// "Pack / Category / Name" says everything in one field, and the entry is
+// pre-filled with the current values so the syntax is visible rather than
+// documented. Fewer parts still work: two are read as category and name, one
+// as just a name, with the caller's defaults filling the rest.
+struct PresetPath {
+    std::string pack, category, name;
+};
+
+inline PresetPath ParsePresetPath(const char* text, const std::string& defPack,
+                                  const std::string& defCategory) {
+    std::vector<std::string> parts;
+    std::string current;
+    for (const char* c = text ? text : ""; *c; ++c) {
+        if (*c == '/') { parts.push_back(current); current.clear(); }
+        else current.push_back(*c);
+    }
+    parts.push_back(current);
+
+    const auto trim = [](std::string v) {
+        while (!v.empty() && v.front() == ' ') v.erase(v.begin());
+        while (!v.empty() && v.back() == ' ') v.pop_back();
+        return v;
+    };
+
+    PresetPath out;
+    if (parts.size() >= 3) {
+        out.pack = trim(parts[0]);
+        out.category = trim(parts[1]);
+        out.name = trim(parts[2]);
+    } else if (parts.size() == 2) {
+        out.category = trim(parts[0]);
+        out.name = trim(parts[1]);
+    } else {
+        out.name = trim(parts[0]);
+    }
+    if (out.pack.empty()) out.pack = defPack;
+    if (out.category.empty()) out.category = defCategory;
+    return out;
 }
 
 inline const char* TypeName(int i) {
@@ -488,6 +537,74 @@ private:
     SelectFunc mOnSelect;
     int mSelected = 0;
     bool mEnabled = false;
+};
+
+// A button that opens a menu and shows the current choice.
+//
+// A popup rather than a row of chips because the number of options is not
+// known at layout time -- a user can have one pack or forty, and a strip of
+// forty would either overflow the page or squeeze each to nothing. The choices
+// are fetched when the menu opens, so a pack imported a moment ago is there
+// without anything having to invalidate the control.
+class FilterButtonControl : public IControl {
+public:
+    using ItemsFunc = std::function<std::vector<std::string>()>;
+    using PickFunc = std::function<void(const std::string& choice)>;
+
+    FilterButtonControl(const IRECT& bounds, const char* label, ItemsFunc items,
+                        PickFunc onPick)
+    : IControl(bounds), mLabel(label ? label : ""), mItems(std::move(items)),
+      mOnPick(std::move(onPick)) {}
+
+    void SetChoice(const std::string& c) { mChoice = c; SetDirty(false); }
+    const std::string& Choice() const { return mChoice; }
+
+    void Draw(IGraphics& g) override {
+        g.FillRoundRect(mMouseIsOver ? IColor(255, 42, 48, 58) : IColor(255, 30, 34, 41),
+                        mRECT, 3.f);
+        g.DrawRoundRect(IColor(255, 60, 66, 76), mRECT, 3.f, nullptr, 1.f);
+
+        const IRECT inner = mRECT.GetHPadded(-8.f);
+        g.DrawText(IText(9.f, IColor(255, 120, 130, 145), nullptr, EAlign::Near),
+                   mLabel.c_str(), inner.GetFromTop(11.f));
+        g.DrawText(IText(12.f, IColor(255, 222, 228, 236), nullptr, EAlign::Near),
+                   mChoice.c_str(), inner.GetReducedFromTop(10.f));
+
+        // A caret, so it reads as something that opens rather than a label.
+        const float cx = mRECT.R - 10.f, cy = mRECT.MH() + 3.f;
+        g.PathClear();
+        g.PathMoveTo(cx - 4.f, cy - 2.f);
+        g.PathLineTo(cx, cy + 2.f);
+        g.PathLineTo(cx + 4.f, cy - 2.f);
+        g.PathStroke(IPattern(IColor(255, 140, 150, 165)), 1.4f);
+    }
+
+    void OnMouseDown(float, float, const IMouseMod&) override {
+        if (!mItems) return;
+        mChoices = mItems();
+        mMenu.Clear();
+        for (size_t i = 0; i < mChoices.size(); ++i) {
+            mMenu.AddItem(mChoices[i].c_str());
+            if (mChoices[i] == mChoice) mMenu.SetChosenItemIdx(static_cast<int>(i));
+        }
+        GetUI()->CreatePopupMenu(*this, mMenu, mRECT);
+    }
+
+    void OnPopupMenuSelection(IPopupMenu* pMenu, int) override {
+        if (!pMenu) return;
+        const int idx = pMenu->GetChosenItemIdx();
+        if (idx < 0 || idx >= static_cast<int>(mChoices.size())) return;
+        mChoice = mChoices[static_cast<size_t>(idx)];
+        SetDirty(false);
+        if (mOnPick) mOnPick(mChoice);
+    }
+
+private:
+    std::string mLabel, mChoice;
+    ItemsFunc mItems;
+    PickFunc mOnPick;
+    IPopupMenu mMenu;
+    std::vector<std::string> mChoices;
 };
 
 // Text entry that is not attached to a parameter.

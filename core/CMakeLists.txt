@@ -15,7 +15,7 @@ add_library(sl_core STATIC
   src/Analysis.cpp
   src/WavIO.cpp
   src/SampleMatch.cpp
-  src/UserPresets.cpp
+  src/PresetLibrary.cpp
   src/Oversampler.cpp
 )
 

@@ -147,7 +147,7 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
     // Forward slashes on every platform: the Win32 file APIs and
     // std::filesystem both accept them, so the path needs no separator switch.
     dir.Append("/Seedlathe/Presets");
-    mUserPresets.open(dir.Get());
+    mLibrary.open(dir.Get());
   }
 
 #ifdef APP_API
@@ -170,12 +170,30 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
     mDesignerControls.clear();
     mPrompt = nullptr;
 
-    // Another instance may have saved something since this editor last opened.
-    mUserPresets.refresh();
+    // Another instance may have saved a pack since this editor last opened,
+    // and a pack may have been dropped into the folder by hand.
+    mLibrary.refresh();
 
     g->AttachPanelBackground(kBg);
     g->EnableMouseOver(true);
     g->LoadFont("Roboto-Regular", ROBOTO_FN);
+
+    // Menus drawn inside the plugin window rather than as native ones. A
+    // platform popup is a separate top-level window, which in a plugin means
+    // one that can open behind the host, land on the wrong monitor, or wear
+    // the host's theme instead of this one. IGraphics draws its own when a
+    // popup control is attached.
+    g->AttachPopupMenuControl(IText(14.f, kTextCol));
+    if (auto* menu = g->GetPopupMenuControl()) {
+      // Its defaults are white on blue, which is jarring against everything
+      // else here. Same palette as the lists it is opened from.
+      menu->SetPanelColor(IColor(255, 26, 30, 36));
+      menu->SetCellBackgroundColor(IColor(255, 40, 70, 110));
+      menu->SetItemColor(kTextCol);
+      menu->SetItemMouseoverColor(IColor(255, 255, 255, 255));
+      menu->SetDisabledItemColor(IColor(255, 96, 104, 118));
+      menu->SetSeparatorColor(IColor(255, 60, 66, 76));
+    }
 
     const IRECT all = g->GetBounds();
     const IRECT top = all.GetFromTop(120.f).GetPadded(-10.f);
@@ -293,23 +311,61 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
 
     // -- Presets
     {
-      const IRECT bar = page.GetFromTop(30.f);
-      g->AttachControl(new IVButtonControl(bar.GetFromLeft(150.f).GetPadded(-3.f),
-          Click([this] { PromptSavePreset(); }), "Save current...", style),
-          kNoTag, "presets");
-      g->AttachControl(new IVButtonControl(
-          bar.GetReducedFromLeft(150.f).GetFromLeft(110.f).GetPadded(-3.f),
-          Click([this] { PromptRenamePreset(); }), "Rename...", style),
-          kNoTag, "presets");
-      g->AttachControl(new IVButtonControl(
-          bar.GetReducedFromLeft(260.f).GetFromLeft(110.f).GetPadded(-3.f),
-          Click([this] { DeleteSelectedPreset(); }), "Delete", style),
-          kNoTag, "presets");
-      g->AttachControl(new ITextControl(bar.GetReducedFromLeft(380.f),
+      // Row one: the two filters, which both start on "everything".
+      const IRECT filters = page.GetFromTop(34.f);
+      g->AttachControl(new seedlathe::FilterButtonControl(
+          filters.GetFromLeft(200.f).GetVPadded(-2.f), "PACK",
+          [this] {
+            std::vector<std::string> out{seedlathe::kAllPacks};
+            for (const auto& pack : mLibrary.packs()) out.push_back(pack.name);
+            return out;
+          },
+          [this](const std::string& choice) {
+            mFilterPack = (choice == seedlathe::kAllPacks) ? std::string() : choice;
+            RefreshPresetList();
+          }), kCtrlTagPackFilter, "presets");
+
+      g->AttachControl(new seedlathe::FilterButtonControl(
+          filters.GetReducedFromLeft(206.f).GetFromLeft(200.f).GetVPadded(-2.f),
+          "CATEGORY",
+          [this] {
+            std::vector<std::string> out{seedlathe::kAllCategories};
+            for (const auto& c : mLibrary.categories()) out.push_back(c);
+            return out;
+          },
+          [this](const std::string& choice) {
+            mFilterCategory =
+                (choice == seedlathe::kAllCategories) ? std::string() : choice;
+            RefreshPresetList();
+          }), kCtrlTagCategoryFilter, "presets");
+
+      g->AttachControl(new ITextControl(
+          filters.GetReducedFromLeft(414.f),
           "", IText(12.f, kDim, nullptr, EAlign::Near)),
           kCtrlTagPresetStatus, "presets");
 
-      auto* list = new ListControl(page.GetReducedFromTop(34.f),
+      // Row two: what you can do to the bank.
+      const IRECT bar = page.GetReducedFromTop(38.f).GetFromTop(30.f);
+      const auto barBtn = [&](float x, float w, const char* label,
+                              std::function<void()> fn) {
+        g->AttachControl(new IVButtonControl(
+            bar.GetReducedFromLeft(x).GetFromLeft(w).GetPadded(-3.f),
+            Click(std::move(fn)), label, style), kNoTag, "presets");
+      };
+      barBtn(0.f, 150.f, "Save current...", [this] { PromptSavePreset(); });
+      barBtn(150.f, 110.f, "Rename...", [this] { PromptRenamePreset(); });
+      barBtn(260.f, 90.f, "Delete", [this] { DeleteSelectedPreset(); });
+      barBtn(356.f, 100.f, "Import...", [this] { ImportPresetPack(); });
+      barBtn(456.f, 100.f, "Export...", [this] { ExportPresetPack(); });
+      // Packs can also arrive by being dropped into the folder, and the
+      // plugin has no reason to notice until it is asked.
+      barBtn(562.f, 90.f, "Rescan", [this] {
+        mLibrary.refresh();
+        RefreshPresetList();
+        SetPresetStatus("Rescanned the preset folder");
+      });
+
+      auto* list = new ListControl(page.GetReducedFromTop(72.f),
                                    [this](int payload) { LoadPreset(payload); });
       g->AttachControl(list, kCtrlTagPresetList, "presets");
     }
@@ -319,9 +375,8 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
     // -- Search
     g->AttachControl(new ITextControl(page.GetFromTop(46.f),
         "Searches seeds of the same type as the current instrument, including "
-        "anything you have designed, and keeps the twenty closest.
-"
-        "Stopping keeps them too.",
+        "anything you have designed, and keeps the twenty closest. Stopping "
+        "keeps them too.",
         IText(12.f, kDim)), kNoTag, "search");
     {
       const IRECT row = page.GetReducedFromTop(50.f).GetFromTop(36.f).GetFromLeft(560.f);
@@ -834,46 +889,110 @@ void Seedlathe::SyncDesigner()
 
 #if IPLUG_EDITOR
 
-// User presets sort above the factory bank and their payloads are offset past
-// it, so one list can carry both without the picker having to know which list
-// row came from where.
-static constexpr int kUserPresetBase = 100000;
+// The preset browser.
+//
+// A row carries one int, so the payload is an index into mBrowserRows rather
+// than two indices packed into one number -- that kind of arithmetic works
+// right up until a pack grows past the multiplier.
 
-void Seedlathe::RefreshPresetList()
+// Which row the browser should highlight.
+//
+// Row payloads are positions in the filtered list, so they mean nothing once
+// the filters change -- highlighting "payload 3" after a filter change picks
+// whatever happens to be third now. The selection is therefore recomputed
+// from the pack and name, every time the rows are rebuilt.
+void Seedlathe::UpdatePresetSelection()
 {
   auto* ui = GetUI();
   if (!ui) return;
   auto* c = ui->GetControlWithTag(kCtrlTagPresetList);
   if (!c) return;
 
+  const auto& packs = mLibrary.packs();
+  int chosen = -1;
+  int bySeed = -1;
+
+  for (size_t row = 0; row < mBrowserRows.size(); ++row) {
+    const int pi = mBrowserRows[row].first, qi = mBrowserRows[row].second;
+    if (pi < 0 || pi >= static_cast<int>(packs.size())) continue;
+    const auto& presets = packs[static_cast<size_t>(pi)].presets;
+    if (qi < 0 || qi >= static_cast<int>(presets.size())) continue;
+    const sl::Preset& p = presets[static_cast<size_t>(qi)];
+    if (p.seed != P().seed) continue;
+
+    // The one actually loaded wins over a namesake that merely shares its
+    // seed. Matching on the seed at all is what makes rolling onto a
+    // preset's seed show you where you landed.
+    if (packs[static_cast<size_t>(pi)].name == mSelectedPack &&
+        p.name == mSelectedPreset) {
+      chosen = static_cast<int>(row);
+      break;
+    }
+    if (bySeed < 0) bySeed = static_cast<int>(row);
+  }
+
+  c->As<ListControl>()->SetSelected(chosen >= 0 ? chosen : bySeed);
+}
+
+void Seedlathe::RefreshPresetList()
+{
+  auto* ui = GetUI();
+  if (!ui) return;
+
+  // Both filters mean "everything" when empty, which is what they start as.
+  if (auto* c = ui->GetControlWithTag(kCtrlTagPackFilter))
+    c->As<seedlathe::FilterButtonControl>()->SetChoice(
+        mFilterPack.empty() ? seedlathe::kAllPacks : mFilterPack);
+  if (auto* c = ui->GetControlWithTag(kCtrlTagCategoryFilter))
+    c->As<seedlathe::FilterButtonControl>()->SetChoice(
+        mFilterCategory.empty() ? seedlathe::kAllCategories : mFilterCategory);
+
+  auto* c = ui->GetControlWithTag(kCtrlTagPresetList);
+  if (!c) return;
+
+  mBrowserRows.clear();
   std::vector<ListControl::Row> rows;
 
-  const auto& user = mUserPresets.presets();
-  if (!user.empty()) {
-    rows.push_back({"Your presets", "", true, -1});
-    for (size_t i = 0; i < user.size(); ++i) {
+  const auto& packs = mLibrary.packs();
+  for (size_t pi = 0; pi < packs.size(); ++pi) {
+    const sl::PresetPack& pack = packs[pi];
+    if (!mFilterPack.empty() && pack.name != mFilterPack) continue;
+
+    bool packHeader = false;
+    std::string lastCategory;
+
+    for (size_t qi = 0; qi < pack.presets.size(); ++qi) {
+      const sl::Preset& p = pack.presets[qi];
+      if (!mFilterCategory.empty() && p.category != mFilterCategory) continue;
+
+      // Headings are emitted lazily, so a pack that the filters empty out
+      // leaves no heading behind to look like a bug.
+      if (!packHeader) {
+        rows.push_back({pack.name, pack.builtIn ? "built in" : "", true, -1});
+        packHeader = true;
+        lastCategory.clear();
+      }
+      if (p.category != lastCategory) {
+        lastCategory = p.category;
+        const std::string label =
+            p.category.empty() ? std::string("Uncategorised") : p.category;
+        // Indented, so a category reads as sitting inside its pack rather
+        // than as another pack.
+        rows.push_back({"    " + label, "", true, -1});
+      }
+
       char detail[64];
-      std::snprintf(detail, sizeof(detail), "%u%s", user[i].seed,
-                    user[i].edited ? "  edited" : "");
-      rows.push_back({user[i].name, detail, false,
-                      kUserPresetBase + static_cast<int>(i)});
+      std::snprintf(detail, sizeof(detail), "%u%s", p.seed, p.edited ? "  edited" : "");
+      rows.push_back({p.name, detail, false, static_cast<int>(mBrowserRows.size())});
+      mBrowserRows.emplace_back(static_cast<int>(pi), static_cast<int>(qi));
     }
   }
 
-  // Grouped by instrument type, in type order, as the demo page does.
-  for (int t = 0; t < 10; ++t) {
-    bool header = false;
-    for (int i = 0; i < sl::kNumFactoryPresets; ++i) {
-      const auto& p = sl::kFactoryPresets[i];
-      if (p.typeIndex != t) continue;
-      if (!header) { rows.push_back({TypeName(t), "", true, -1}); header = true; }
-      char detail[32];
-      std::snprintf(detail, sizeof(detail), "%u", p.seed);
-      rows.push_back({p.name, detail, false, i});
-    }
-  }
+  if (rows.empty())
+    rows.push_back({"Nothing matches those filters", "", true, -1});
 
   c->As<ListControl>()->SetRows(std::move(rows));
+  UpdatePresetSelection();
 }
 
 void Seedlathe::SetPresetStatus(const char* text)
@@ -884,37 +1003,58 @@ void Seedlathe::SetPresetStatus(const char* text)
     c->As<ITextControl>()->SetStr(text ? text : "");
 }
 
+void Seedlathe::ApplyPresetValues(const sl::Preset& p)
+{
+  const struct { int idx; double value; } values[] = {
+      {sl::kOctave, static_cast<double>(std::clamp(p.octave, -3, 3))},
+      {sl::kVolume, p.volume},
+      {sl::kFilterCutoff, p.cutoff},
+      {sl::kFilterRes, p.resonance},
+  };
+  for (const auto& v : values) {
+    GetParam(v.idx)->Set(v.value);
+    SendParameterValueFromDelegate(v.idx, GetParam(v.idx)->GetNormalized(), true);
+  }
+}
+
+sl::Preset Seedlathe::CaptureAsPreset() const
+{
+  sl::Preset p;
+  p.seed = P().seed;
+  p.octave = GetParam(sl::kOctave)->Int();
+  p.volume = GetParam(sl::kVolume)->Value();
+  p.cutoff = GetParam(sl::kFilterCutoff)->Value();
+  p.resonance = GetParam(sl::kFilterRes)->Value();
+  p.edited = P().edited;
+  p.instrument = P().edit;
+  return p;
+}
+
 void Seedlathe::LoadPreset(int payload)
 {
-  if (payload >= kUserPresetBase) {
-    const size_t i = static_cast<size_t>(payload - kUserPresetBase);
-    if (i >= mUserPresets.presets().size()) return;
-    const sl::UserPreset& p = mUserPresets.presets()[i];
-    mSelectedUserPreset = p.name;
+  if (payload < 0 || payload >= static_cast<int>(mBrowserRows.size())) return;
+  const int packIdx = mBrowserRows[static_cast<size_t>(payload)].first;
+  const int presetIdx = mBrowserRows[static_cast<size_t>(payload)].second;
 
-    SetSeed(p.seed);
-    // The seed load has already regenerated P().edit, so the stored instrument
-    // goes on top of it -- and only when the preset actually holds one.
-    if (p.edited) {
-      P().edit = p.instrument;
-      P().designOsc = 0;
-      PushEdit();
-      SyncDesigner();
-    }
-    GetParam(sl::kOctave)->Set(std::clamp(p.octave, -3, 3));
-    SendParameterValueFromDelegate(sl::kOctave,
-                                   GetParam(sl::kOctave)->GetNormalized(), true);
-    SetPresetStatus("");
-    return;
-  }
+  const auto& packs = mLibrary.packs();
+  if (packIdx < 0 || packIdx >= static_cast<int>(packs.size())) return;
+  const sl::PresetPack& pack = packs[static_cast<size_t>(packIdx)];
+  if (presetIdx < 0 || presetIdx >= static_cast<int>(pack.presets.size())) return;
+  const sl::Preset& p = pack.presets[static_cast<size_t>(presetIdx)];
 
-  if (payload < 0 || payload >= sl::kNumFactoryPresets) return;
-  const auto& p = sl::kFactoryPresets[payload];
-  mSelectedUserPreset.clear();
+  mSelectedPack = pack.name;
+  mSelectedPreset = p.name;
+
   SetSeed(p.seed);
-  GetParam(sl::kOctave)->Set(std::clamp(p.octave, -3, 3));
-  SendParameterValueFromDelegate(sl::kOctave,
-                                 GetParam(sl::kOctave)->GetNormalized(), true);
+  // The seed load has already regenerated P().edit, so a stored instrument
+  // goes on top of it -- and only when the preset actually holds one.
+  if (p.edited) {
+    P().edit = p.instrument;
+    P().designOsc = 0;
+    PushEdit();
+    SyncDesigner();
+  }
+  ApplyPresetValues(p);
   SetPresetStatus("");
 }
 
@@ -922,35 +1062,42 @@ void Seedlathe::PromptSavePreset()
 {
   auto* ui = GetUI();
   if (!ui || !mPrompt) return;
-  if (!mUserPresets.ready()) {
-    SetPresetStatus(mUserPresets.error().empty()
-                        ? "No writable preset folder"
-                        : mUserPresets.error().c_str());
+  if (!mLibrary.ready()) {
+    SetPresetStatus(mLibrary.error().empty() ? "No writable preset folder"
+                                             : mLibrary.error().c_str());
     return;
   }
 
-  char suggested[64];
-  if (!mSelectedUserPreset.empty())
-    std::snprintf(suggested, sizeof(suggested), "%s", mSelectedUserPreset.c_str());
+  // Never offer to save into the built-in bank, which cannot take it.
+  std::string pack = mSelectedPack;
+  if (pack.empty() || pack == seedlathe::kBuiltInPackName) pack = sl::kDefaultPackName;
+  const std::string category = TypeName(P().edit.typeIndex);
+
+  char suggested[256];
+  if (!mSelectedPreset.empty() && mSelectedPack == pack)
+    std::snprintf(suggested, sizeof(suggested), "%s / %s / %s", pack.c_str(),
+                  category.c_str(), mSelectedPreset.c_str());
   else
-    std::snprintf(suggested, sizeof(suggested), "%s %u", TypeName(P().edit.typeIndex),
-                  P().seed);
+    std::snprintf(suggested, sizeof(suggested), "%s / %s / %s %u", pack.c_str(),
+                  category.c_str(), category.c_str(), P().seed);
 
-  mPrompt->Prompt(GetUI()->GetBounds().GetCentredInside(320.f, 30.f), suggested,
-                  [this](const char* text) {
-                    sl::UserPreset p;
-                    p.name = sl::sanitisePresetName(text);
-                    p.seed = P().seed;
-                    p.octave = GetParam(sl::kOctave)->Int();
-                    p.edited = P().edited;
-                    p.instrument = P().edit;
+  mPrompt->Prompt(GetUI()->GetBounds().GetCentredInside(460.f, 30.f), suggested,
+                  [this, pack, category](const char* text) {
+                    const seedlathe::PresetPath path =
+                        seedlathe::ParsePresetPath(text, pack, category);
 
-                    char buf[192];
-                    if (mUserPresets.save(p)) {
-                      mSelectedUserPreset = p.name;
-                      std::snprintf(buf, sizeof(buf), "Saved \"%s\"", p.name.c_str());
+                    sl::Preset p = CaptureAsPreset();
+                    p.name = sl::sanitisePresetName(path.name);
+                    p.category = sl::sanitisePresetName(path.category);
+
+                    char buf[256];
+                    if (mLibrary.save(path.pack, p)) {
+                      mSelectedPack = path.pack;
+                      mSelectedPreset = p.name;
+                      std::snprintf(buf, sizeof(buf), "Saved \"%s\" to %s",
+                                    p.name.c_str(), path.pack.c_str());
                     } else {
-                      std::snprintf(buf, sizeof(buf), "%s", mUserPresets.error().c_str());
+                      std::snprintf(buf, sizeof(buf), "%s", mLibrary.error().c_str());
                     }
                     RefreshPresetList();
                     SetPresetStatus(buf);
@@ -961,42 +1108,118 @@ void Seedlathe::PromptRenamePreset()
 {
   auto* ui = GetUI();
   if (!ui || !mPrompt) return;
-  if (mSelectedUserPreset.empty()) {
-    SetPresetStatus("Select one of your presets first");
+
+  const sl::Preset* current = mLibrary.find(mSelectedPack, mSelectedPreset);
+  if (!current) {
+    SetPresetStatus("Select one of your own presets first");
     return;
   }
 
-  const std::string from = mSelectedUserPreset;
-  mPrompt->Prompt(GetUI()->GetBounds().GetCentredInside(320.f, 30.f), from.c_str(),
-                  [this, from](const char* text) {
-                    const std::string to = sl::sanitisePresetName(text);
-                    char buf[192];
-                    if (mUserPresets.rename(from, to)) {
-                      mSelectedUserPreset = to;
-                      std::snprintf(buf, sizeof(buf), "Renamed to \"%s\"", to.c_str());
-                    } else {
-                      std::snprintf(buf, sizeof(buf), "%s", mUserPresets.error().c_str());
-                    }
-                    RefreshPresetList();
-                    SetPresetStatus(buf);
-                  });
+  // The same one-line syntax as Save, so this one gesture also moves a preset
+  // to another pack or category rather than needing three of them.
+  const std::string fromPack = mSelectedPack;
+  const std::string fromName = mSelectedPreset;
+  const std::string fromCategory = current->category;
+
+  char suggested[256];
+  std::snprintf(suggested, sizeof(suggested), "%s / %s / %s", fromPack.c_str(),
+                fromCategory.c_str(), fromName.c_str());
+
+  mPrompt->Prompt(
+      GetUI()->GetBounds().GetCentredInside(460.f, 30.f), suggested,
+      [this, fromPack, fromName, fromCategory](const char* text) {
+        const seedlathe::PresetPath path =
+            seedlathe::ParsePresetPath(text, fromPack, fromCategory);
+        const std::string name = sl::sanitisePresetName(path.name);
+        const std::string category = sl::sanitisePresetName(path.category);
+
+        char buf[256];
+        bool ok = false;
+        if (const sl::Preset* p = mLibrary.find(fromPack, fromName)) {
+          sl::Preset moved = *p;
+          moved.name = name;
+          moved.category = category;
+          // Write the new one before removing the old: the other order loses
+          // the preset outright if the write fails.
+          ok = mLibrary.save(path.pack, moved);
+          if (ok && (path.pack != fromPack || name != fromName))
+            mLibrary.remove(fromPack, fromName);
+        }
+
+        if (ok) {
+          mSelectedPack = path.pack;
+          mSelectedPreset = name;
+          std::snprintf(buf, sizeof(buf), "Now %s / %s / %s", path.pack.c_str(),
+                        category.c_str(), name.c_str());
+        } else {
+          std::snprintf(buf, sizeof(buf), "%s", mLibrary.error().c_str());
+        }
+        RefreshPresetList();
+        SetPresetStatus(buf);
+      });
 }
 
 void Seedlathe::DeleteSelectedPreset()
 {
-  if (mSelectedUserPreset.empty()) {
-    SetPresetStatus("Select one of your presets first");
+  if (mSelectedPreset.empty()) {
+    SetPresetStatus("Select one of your own presets first");
     return;
   }
 
-  char buf[192];
-  if (mUserPresets.remove(mSelectedUserPreset))
-    std::snprintf(buf, sizeof(buf), "Deleted \"%s\"", mSelectedUserPreset.c_str());
+  char buf[256];
+  if (mLibrary.remove(mSelectedPack, mSelectedPreset))
+    std::snprintf(buf, sizeof(buf), "Deleted \"%s\"", mSelectedPreset.c_str());
   else
-    std::snprintf(buf, sizeof(buf), "%s", mUserPresets.error().c_str());
+    std::snprintf(buf, sizeof(buf), "%s", mLibrary.error().c_str());
 
-  mSelectedUserPreset.clear();
+  mSelectedPreset.clear();
   RefreshPresetList();
+  SetPresetStatus(buf);
+}
+
+void Seedlathe::ImportPresetPack()
+{
+  auto* ui = GetUI();
+  if (!ui) return;
+
+  WDL_String file, dir;
+  ui->PromptForFile(file, dir, EFileAction::Open, "json");
+  if (!file.GetLength()) return;
+
+  std::string landedAs;
+  char buf[256];
+  if (mLibrary.importPack(file.Get(), &landedAs))
+    std::snprintf(buf, sizeof(buf), "Imported as \"%s\"", landedAs.c_str());
+  else
+    std::snprintf(buf, sizeof(buf), "%s", mLibrary.error().c_str());
+
+  RefreshPresetList();
+  SetPresetStatus(buf);
+}
+
+void Seedlathe::ExportPresetPack()
+{
+  auto* ui = GetUI();
+  if (!ui) return;
+
+  // Exporting the built-in bank is how you get an editable copy of the
+  // factory sounds without retyping a hundred and fifteen of them.
+  const std::string pack =
+      mSelectedPack.empty() ? std::string(seedlathe::kBuiltInPackName) : mSelectedPack;
+
+  WDL_String file, dir;
+  char suggested[128];
+  std::snprintf(suggested, sizeof(suggested), "%s.json",
+                sl::sanitisePresetName(pack).c_str());
+  file.Set(suggested);
+  ui->PromptForFile(file, dir, EFileAction::Save, "json");
+  if (!file.GetLength()) return;
+
+  char buf[256];
+  if (mLibrary.exportPack(pack, file.Get()))
+    std::snprintf(buf, sizeof(buf), "Exported \"%s\"", pack.c_str());
+  else
+    std::snprintf(buf, sizeof(buf), "%s", mLibrary.error().c_str());
   SetPresetStatus(buf);
 }
 
@@ -1514,22 +1737,7 @@ void Seedlathe::RefreshSeedDisplay()
   // Highlight the preset the current seed corresponds to, however it was
   // reached. Matching on the seed rather than only on a click means rolling
   // onto a preset's seed shows you where you landed.
-  if (auto* c = ui->GetControlWithTag(kCtrlTagPresetList)) {
-    int payload = -1;
-    const auto& user = mUserPresets.presets();
-    for (size_t i = 0; i < user.size(); ++i)
-      if (user[i].seed == P().seed && user[i].name == mSelectedUserPreset) {
-        payload = kUserPresetBase + static_cast<int>(i);
-        break;
-      }
-    if (payload < 0)
-      for (size_t i = 0; i < user.size(); ++i)
-        if (user[i].seed == P().seed) { payload = kUserPresetBase + static_cast<int>(i); break; }
-    if (payload < 0)
-      for (int i = 0; i < sl::kNumFactoryPresets; ++i)
-        if (sl::kFactoryPresets[i].seed == P().seed) { payload = i; break; }
-    c->As<ListControl>()->SetSelected(payload);
-  }
+  UpdatePresetSelection();
 
   if (auto* c = ui->GetControlWithTag(kCtrlTagOscCount)) {
     char buf[48];

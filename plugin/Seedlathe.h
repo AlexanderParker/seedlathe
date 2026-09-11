@@ -12,7 +12,7 @@
 #include "SampleMatch.h"
 #include "Oversampler.h"
 #include "Quiescer.h"
-#include "UserPresets.h"
+#include "PresetLibrary.h"
 #include "SeedSearch.h"
 #include "sl/Instrument.h"
 #include "webaudio/WaCompressor.h"
@@ -20,6 +20,7 @@
 #include <array>
 #include <functional>
 #include <string>
+#include <utility>
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -62,6 +63,8 @@ enum EControlTags
   kCtrlTagBack,
   kCtrlTagNext,
   kCtrlTagComponents,
+  kCtrlTagPackFilter,
+  kCtrlTagCategoryFilter,
   kNumCtrlTags
 };
 
@@ -202,14 +205,23 @@ private:
   void RefreshSampleInfo();
   void RefreshResultList(int ctrlTag, const std::vector<sl::Candidate>& top);
 
-  // Preset list and the user's own bank. Editor-only: they exist to drive
-  // controls, and a DSP-only build has no list to refresh.
+  // Preset browser. Editor-only: these exist to drive controls, and a
+  // DSP-only build has no list to refresh.
   void RefreshPresetList();
+  void UpdatePresetSelection();
   void SetPresetStatus(const char* text);
   void LoadPreset(int payload);
   void PromptSavePreset();
   void PromptRenamePreset();
   void DeleteSelectedPreset();
+  void ImportPresetPack();
+  void ExportPresetPack();
+
+  // Applies a preset's four performance values. A preset is a SOUND, not a
+  // parameter set: a pad and a kick want different levels and octaves, and
+  // restoring only the seed loads one at the other's settings.
+  void ApplyPresetValues(const sl::Preset& p);
+  sl::Preset CaptureAsPreset() const;
   sl::Osc& EditOsc();
 
   // Sixteen parts, all but the first allocated only when something addresses
@@ -241,8 +253,20 @@ private:
   // Last published runners-up, so the lists are only rebuilt when they move.
   std::vector<sl::Candidate> mSearchTop, mSampleTop;
 
-  sl::UserPresetStore mUserPresets;
-  std::string mSelectedUserPreset;
+  sl::PresetLibrary mLibrary;
+
+  // What the browser has highlighted. A name alone is not enough now that two
+  // packs may each hold a "Bass 1".
+  std::string mSelectedPack, mSelectedPreset;
+
+  // Browser filters. Empty means "everything", which is what both start as.
+  std::string mFilterPack, mFilterCategory;
+
+  // Row payload -> (pack index, preset index). The list control carries a
+  // single int per row, and encoding two indices into one is the kind of
+  // arithmetic that silently breaks when a pack grows past the multiplier.
+  std::vector<std::pair<int, int>> mBrowserRows;
+
   seedlathe::TextPromptControl* mPrompt = nullptr;
 
 
