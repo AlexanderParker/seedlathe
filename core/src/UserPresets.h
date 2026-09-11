@@ -58,6 +58,16 @@ private:
     bool ready_ = false;
 };
 
+// Longest name a preset may carry. sanitisePresetName truncates to it, so a
+// text entry that collects a name must allow at least this many characters --
+// IGraphics defaults every entry to seven, which is where "it won't let me
+// type more than about eight" came from.
+//
+// One number rather than separate bounds for typed and on-disk names: a name
+// read from a file longer than this would be clipped the moment it was saved
+// again, so accepting it whole only means the two disagree.
+inline constexpr size_t kMaxPresetNameChars = 64;
+
 // Turns a user-typed name into something safe to use as a file name, keeping
 // it recognisable. Empty or entirely unusable input becomes "Untitled".
 std::string sanitisePresetName(const std::string& name);

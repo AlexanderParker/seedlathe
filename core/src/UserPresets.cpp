@@ -37,7 +37,7 @@ std::string sanitisePresetName(const std::string& name) {
     while (!out.empty() && out.front() == ' ') out.erase(out.begin());
 
     if (out.empty()) out = "Untitled";
-    if (out.size() > 64) out.resize(64);
+    if (out.size() > kMaxPresetNameChars) out.resize(kMaxPresetNameChars);
     return out;
 }
 
@@ -65,10 +65,6 @@ std::string UserPresetStore::pathFor(const std::string& name) const {
 // stops a large file that happens to be sitting in the folder from being
 // parsed in full before it is rejected.
 constexpr std::uintmax_t kMaxPresetBytes = 1024 * 1024;
-
-// Long enough for any name worth typing. The value is whatever the file says,
-// so it is bounded before it reaches a list control.
-constexpr size_t kMaxNameChars = 128;
 
 void UserPresetStore::refresh() {
     presets_.clear();
@@ -104,7 +100,7 @@ void UserPresetStore::refresh() {
         try {
             const nlohmann::json j = nlohmann::json::parse(f);
             p.name = j.value("name", entry.path().stem().string());
-            if (p.name.size() > kMaxNameChars) p.name.resize(kMaxNameChars);
+            if (p.name.size() > kMaxPresetNameChars) p.name.resize(kMaxPresetNameChars);
             p.seed = j.value("seed", 0u);
             p.octave = std::clamp(j.value("octave", 0), -3, 3);
             if (j.contains("instrument") && !j["instrument"].is_null()) {

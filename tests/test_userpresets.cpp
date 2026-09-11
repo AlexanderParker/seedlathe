@@ -38,7 +38,32 @@ TEST_CASE("sanitisePresetName keeps names legal on every platform") {
     REQUIRE(sl::sanitisePresetName("trailing. ") == "trailing");
     REQUIRE(sl::sanitisePresetName("   ") == "Untitled");
     REQUIRE(sl::sanitisePresetName("") == "Untitled");
-    REQUIRE(sl::sanitisePresetName(std::string(200, 'x')).size() == 64);
+    REQUIRE(sl::sanitisePresetName(std::string(200, 'x')).size() ==
+            sl::kMaxPresetNameChars);
+}
+
+TEST_CASE("a preset name longer than a word survives being saved") {
+    // Reported as "it won't let me type more than about eight characters".
+    // The cause was the text entry, which IGraphics sizes at seven characters
+    // unless told otherwise -- but the limit the UI is told to use is this
+    // constant, so it has to be worth having.
+    TempDir dir("sl_presets_longname");
+    sl::UserPresetStore store;
+    REQUIRE(store.open(dir.str()));
+
+    const std::string name = "Deep Evolving Pad For The Bridge";
+    REQUIRE(name.size() > 7);
+    REQUIRE(name.size() <= sl::kMaxPresetNameChars);
+    REQUIRE(sl::sanitisePresetName(name) == name);
+
+    sl::UserPreset p;
+    p.name = name;
+    p.seed = 3703184240u;
+    REQUIRE(store.save(p));
+
+    store.refresh();
+    REQUIRE(store.presets().size() == 1);
+    REQUIRE(store.presets()[0].name == name);
 }
 
 TEST_CASE("a saved preset comes back with the same seed and octave") {

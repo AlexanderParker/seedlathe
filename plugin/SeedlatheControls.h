@@ -3,6 +3,7 @@
 #include "IControl.h"
 #include "IControls.h"
 #include "SeedlatheParams.h"
+#include "UserPresets.h"
 #include "sl/FactoryPresets.h"
 
 #include <cstdio>
@@ -36,6 +37,9 @@ public:
     : IControl(bounds), mOnSeed(std::move(onSeed)), mStyle(style) {
         mIgnoreMouse = false;
         mDblAsSingleClick = true;
+        // 4294967295 is ten digits and IGraphics allows seven by default, so
+        // without this the largest seed a user could type in was 9999999.
+        SetTextEntryLength(10);
     }
 
     void SetSeed(uint32_t s) {
@@ -246,7 +250,13 @@ class TextPromptControl : public IControl {
 public:
     using DoneFunc = std::function<void(const char* text)>;
 
-    TextPromptControl() : IControl(IRECT()) { mIgnoreMouse = true; }
+    TextPromptControl() : IControl(IRECT()) {
+        mIgnoreMouse = true;
+        // The whole point of this control is collecting a name, and the
+        // IGraphics default of seven characters cut every one of them off
+        // mid-word with no indication that it had.
+        SetTextEntryLength(static_cast<int>(sl::kMaxPresetNameChars));
+    }
 
     void Prompt(const IRECT& where, const char* initial, DoneFunc done) {
         mDone = std::move(done);

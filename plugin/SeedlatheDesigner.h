@@ -99,6 +99,9 @@ public:
       mGet(std::move(get)), mSet(std::move(set)), mOnChange(std::move(onChange)) {
         mDblAsSingleClick = false;
         mVal = mGet ? mGet() : 0.0;
+        // "-12.000" is already seven characters, which is all IGraphics allows
+        // by default -- so typing a value in was losing digits off the end.
+        SetTextEntryLength(12);
     }
 
     void Sync() override {
