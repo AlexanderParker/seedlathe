@@ -24,9 +24,25 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <vector>
 
 namespace seedlathe {
+
+// One entry in a part's undo history: everything that makes up "the sound you
+// were on", so going back restores a preset load as completely as it restores
+// a dice roll.
+//
+// The seed alone would not do it. An edited patch is a seed plus a deviation,
+// and a preset also carries an octave -- go back to a seed with none of that
+// and you land somewhere the user was never at.
+struct Snapshot {
+    uint32_t seed = 0;
+    sl::Instrument inst{};
+    bool edited = false;
+    int octave = 0;
+};
 
 struct Part {
     // Single mode: one part, so it can afford the full allocation.
@@ -51,6 +67,49 @@ struct Part {
     uint32_t seed = 0;
     bool hasSeed = false;
     int designOsc = 0;
+
+    // Sounds visited on this part, oldest first. Per part rather than global:
+    // going back should undo what happened to the instrument you are looking
+    // at, not walk backwards through sixteen of them interleaved.
+    //
+    // An instrument is about 2 kB, so the depth is what bounds the memory: 64
+    // is roughly 128 kB per part and deeper than anyone retraces by hand.
+    static constexpr size_t kMaxHistory = 64;
+    std::vector<Snapshot> history;
+
+    // Dragging the seed box emits a new seed per mouse move, and each one
+    // replaces the instrument. Recording them all would bury the sound the
+    // user actually wants under a hundred positions of one gesture, so pushes
+    // that arrive in a burst keep only the FIRST -- which is the state the
+    // gesture started from, and the only one worth going back to.
+    //
+    // Time rather than a drag flag because the seed box is not the only
+    // control that streams: the mouse wheel does too, and so would anything
+    // added later.
+    static constexpr auto kCoalesce = std::chrono::milliseconds(500);
+    std::chrono::steady_clock::time_point lastPush{};
+
+    // `now` is a parameter so a test can drive the coalescing window without
+    // sleeping half a second per entry.
+    void pushHistory(const Snapshot& s,
+                     std::chrono::steady_clock::time_point now =
+                         std::chrono::steady_clock::now()) {
+        if (!history.empty() && now - lastPush < kCoalesce) {
+            lastPush = now;
+            return;
+        }
+        lastPush = now;
+
+        // Replacing a sound with the same sound must not fill the history with
+        // entries that go nowhere. Only unedited patches are collapsed: for an
+        // edited one the seed says nothing about what the instrument holds, so
+        // two entries sharing a seed can still be different sounds.
+        if (!history.empty() && !s.edited && !history.back().edited &&
+            history.back().seed == s.seed && history.back().octave == s.octave)
+            return;
+        if (history.size() >= kMaxHistory) history.erase(history.begin());
+        history.push_back(s);
+    }
 
     // Parts other than the first are only allocated once something addresses
     // them, so a two-part session does not pay for sixteen.

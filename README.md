@@ -21,6 +21,17 @@ same here as it does on the zyn demo page — enforced by automated tests, not b
   still lands in the top ten of the factory bank. Scores drop as noise rises, which
   is the honest signal: the match really is looser, so a threshold still means
   something.
+- **Live modulation.** Cutoff and Resonance ride on top of every oscillator's filter
+  envelope and reach notes that are already sounding — the only two parameters that
+  do, since everything else about a seed is scheduled at note-on. Both are host
+  parameters, so they automate. At their defaults they are exactly zero-sum and the
+  render is bit-identical to one without them. zyn.js gained the same control as
+  `Z.setFilterMod`.
+- **Instrument overview.** The Instrument tab draws every oscillator the seed
+  produced at once — envelopes, what is switched on, the FM matrix — read-only, for
+  answering "what is this" without clicking through the designer one slot at a time.
+- **Undo.** Back steps through the sounds visited on the current part: seeds, presets,
+  search results, pasted patches and reverts, with the designer edits each carried.
 - **Designer.** Edit any generated instrument directly: five oscillators, draggable
   envelopes, three LFOs, FM, pitch envelope, distortion, per-oscillator delay and
   reverb, and the 5×5 FM matrix. Patches copy and paste as zyn's own JSON.

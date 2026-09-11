@@ -147,12 +147,21 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
                                         [this](uint32_t s) { SetSeed(s); }, style),
                      kCtrlTagSeedBox);
 
-    const IRECT btns = top.GetReducedFromLeft(208.f).GetFromLeft(300.f);
+    const IRECT btns = top.GetReducedFromLeft(208.f).GetFromLeft(344.f);
     g->AttachControl(new IVButtonControl(
-        btns.GetGridCell(0, 1, 3).GetPadded(-3.f),
+        btns.GetGridCell(0, 1, 4).GetPadded(-3.f),
         [this](IControl*) { RollRandomSeed(); }, "Random", style));
+    // Its own fill, lighter than its neighbours'. IGraphics greys a disabled
+    // vector control by SUBTRACTING 64 from each channel, which on this dark
+    // palette lands on black and reads as a broken button rather than an
+    // unavailable one; starting 64 higher puts the disabled state exactly
+    // where the other buttons' normal state sits.
     g->AttachControl(new IVButtonControl(
-        btns.GetGridCell(1, 1, 3).GetPadded(-3.f),
+        btns.GetGridCell(1, 1, 4).GetPadded(-3.f),
+        [this](IControl*) { GoBack(); }, "Back",
+        style.WithColor(kFG, IColor(255, 84, 92, 106))), kCtrlTagBack);
+    g->AttachControl(new IVButtonControl(
+        btns.GetGridCell(2, 1, 4).GetPadded(-3.f),
         [this, g](IControl*) {
           if (mSearch.running()) { mSearch.cancel(); return; }
           mSearch.start(P().livePatch(), 0.0);
@@ -162,11 +171,11 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
             t->As<TabBarControl>()->Select(2);
         }, "Find Similar", style));
     g->AttachControl(new IVButtonControl(
-        btns.GetGridCell(2, 1, 3).GetPadded(-3.f),
+        btns.GetGridCell(3, 1, 4).GetPadded(-3.f),
         [this](IControl*) { P().pool.allNotesOff(); }, "Panic", style));
 
     {
-      const IRECT strip = top.GetReducedFromLeft(528.f).GetFromLeft(360.f);
+      const IRECT strip = top.GetReducedFromLeft(560.f).GetFromLeft(314.f);
       auto* parts = new PartStripControl(
           strip, sl::kNumParts,
           [this](int i) { return mParts[static_cast<size_t>(i)].allocated; },
@@ -651,14 +660,15 @@ void Seedlathe::BuildDesigner(IGraphics* g, const IRECT& page, const IVStyle& st
           } catch (const std::exception&) {
             return;
           }
+          PushHistory();
           P().edit = parsed;
           P().designOsc = 0;
           PushEdit();
           SyncDesigner();
         }, "Paste JSON", style), kNoTag, "design");
     g->AttachControl(new IVButtonControl(rowIn(q, 70.f, 22.f),
-        [this](IControl*) { RebuildInstrument(true); }, "Revert to seed", style),
-        kNoTag, "design");
+        [this](IControl*) { PushHistory(); RebuildInstrument(true); },
+        "Revert to seed", style), kNoTag, "design");
   }
 }
 #endif // IPLUG_EDITOR
@@ -1129,8 +1139,65 @@ void Seedlathe::RefreshSampleInfo()
 #endif
 }
 
+void Seedlathe::PushHistory()
+{
+  // Nothing to go back to before the part has a sound at all, and nothing
+  // worth recording while GoBack is itself mid-flight.
+  if (mRestoring) return;
+  seedlathe::Part& part = P();
+  if (!part.hasSeed) return;
+
+  seedlathe::Snapshot s;
+  s.seed = part.seed;
+  s.inst = part.edit;
+  s.edited = part.edited;
+  s.octave = GetParam(sl::kOctave)->Int();
+  part.pushHistory(s);
+}
+
+void Seedlathe::GoBack()
+{
+  seedlathe::Part& part = P();
+  if (part.history.empty()) return;
+
+  const seedlathe::Snapshot s = part.history.back();
+  part.history.pop_back();
+
+  mRestoring = true;
+
+  // The seed parameters are the authoritative seed for part 1, so they have to
+  // move with it or the host and the engine disagree about what is loaded.
+  if (mEditPart == 0) {
+    GetParam(sl::kSeedHi)->Set(sl::seedHi(s.seed));
+    GetParam(sl::kSeedLo)->Set(sl::seedLo(s.seed));
+    SendParameterValueFromDelegate(sl::kSeedHi, GetParam(sl::kSeedHi)->GetNormalized(), true);
+    SendParameterValueFromDelegate(sl::kSeedLo, GetParam(sl::kSeedLo)->GetNormalized(), true);
+  }
+
+  // The instrument is restored wholesale rather than regenerated from the
+  // seed: for an edited patch the seed is only half of what was there.
+  part.seed = s.seed;
+  part.hasSeed = true;
+  part.edit = s.inst;
+  part.edited = s.edited;
+  part.designOsc = 0;
+  part.pendingPublish = true;
+  ServicePending(part);
+
+  GetParam(sl::kOctave)->Set(std::clamp(s.octave, -3, 3));
+  SendParameterValueFromDelegate(sl::kOctave,
+                                 GetParam(sl::kOctave)->GetNormalized(), true);
+
+  mRestoring = false;
+
+  SyncDesigner();
+  RefreshSeedDisplay();
+}
+
 void Seedlathe::SetSeed(uint32_t seed)
 {
+  PushHistory();
+
   seedlathe::Part& part = P();
   if (mEditPart == 0) {
     // Only part 1's seed is a host parameter; see SeedlatheParams.h.
@@ -1178,6 +1245,11 @@ void Seedlathe::RefreshSeedDisplay()
                             : P().seed;
   if (auto* c = ui->GetControlWithTag(kCtrlTagSeedBox))
     c->As<SeedBoxControl>()->SetSeed(seed);
+
+  // Greyed rather than hidden: a Back button that vanishes when the history
+  // empties moves everything beside it.
+  if (auto* c = ui->GetControlWithTag(kCtrlTagBack))
+    c->SetDisabled(!CanGoBack());
 
   if (auto* c = ui->GetControlWithTag(kCtrlTagPartStrip)) {
     auto* strip = c->As<PartStripControl>();

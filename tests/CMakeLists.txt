@@ -24,6 +24,7 @@ add_executable(sl_tests
   test_topresults.cpp
   test_quiescer.cpp
   test_filtermod.cpp
+  test_history.cpp
   test_perf.cpp
 )
 

@@ -59,6 +59,7 @@ enum EControlTags
   kCtrlTagPartStrip,
   kCtrlTagSampleResults,
   kCtrlTagTabBar,
+  kCtrlTagBack,
   kCtrlTagComponents,
   kNumCtrlTags
 };
@@ -107,6 +108,22 @@ private:
   void SetSeed(uint32_t seed);
   void RollRandomSeed();
   void RefreshSeedDisplay();
+
+  // Undo across whole sounds. Every path that REPLACES the instrument -- a
+  // seed change, a preset, a search result, a pasted patch, a revert --
+  // records what it is about to discard; Back restores it.
+  //
+  // Designer tweaks are deliberately not recorded. They arrive one per mouse
+  // move, so an entry each would bury the sound you actually wanted behind a
+  // hundred handle positions, and the tweaks are carried inside the snapshot
+  // the next replacement takes anyway.
+  void PushHistory();
+  void GoBack();
+  bool CanGoBack() const { return !P().history.empty(); }
+
+  // True while GoBack is applying a snapshot, so the paths it drives do not
+  // record the state it is in the middle of replacing.
+  bool mRestoring = false;
 
   // The designer changed mEdit: mark it edited and queue publication.
   void PushEdit();
