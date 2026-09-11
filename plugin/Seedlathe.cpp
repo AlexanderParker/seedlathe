@@ -198,38 +198,75 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
         }), kCtrlTagTabBar);
 
     // -- Instrument
-    g->AttachControl(new ITextControl(page.GetFromTop(20.f), "Loaded instrument",
+    //
+    // The overview page: what is loaded, the two controls that reach a
+    // sounding note, the output, and every component the seed produced. The
+    // Design tab edits one oscillator at a time; this answers "what IS this"
+    // without a single click.
+    g->AttachControl(new ITextControl(page.GetFromTop(18.f), "Loaded instrument",
                                       IText(12.f, kDim)), kNoTag, "instrument");
-    g->AttachControl(new ITextControl(page.GetReducedFromTop(20.f).GetFromTop(30.f), "",
+    g->AttachControl(new ITextControl(page.GetReducedFromTop(18.f).GetFromTop(26.f), "",
                                       IText(19.f, kTextCol)), kCtrlTagTypeLabel, "instrument");
     {
-      const IRECT engineRow = page.GetReducedFromTop(56.f).GetFromTop(52.f);
+      const IRECT engineRow = page.GetReducedFromTop(48.f).GetFromTop(56.f);
+
+      // The modulation pair comes first: these are the only parameters that
+      // reach a note already sounding, so they are the ones a player reaches
+      // for while holding a chord.
+      g->AttachControl(new IVKnobControl(engineRow.GetFromLeft(96.f).GetVPadded(-2.f),
+                                         sl::kFilterCutoff, "Cutoff", style),
+                       kNoTag, "instrument");
+      g->AttachControl(new IVKnobControl(
+          engineRow.GetReducedFromLeft(96.f).GetFromLeft(96.f).GetVPadded(-2.f),
+          sl::kFilterRes, "Resonance", style), kNoTag, "instrument");
+
       g->AttachControl(new IVTabSwitchControl(
-          engineRow.GetFromLeft(220.f).GetVPadded(-8.f), sl::kOversample,
-          {}, "Oversampling", style), kNoTag, "instrument");
+          engineRow.GetReducedFromLeft(206.f).GetFromLeft(190.f).GetVPadded(-10.f),
+          sl::kOversample, {}, "Oversampling", style), kNoTag, "instrument");
       g->AttachControl(new IVSliderControl(
-          engineRow.GetReducedFromLeft(236.f).GetFromLeft(160.f).GetVPadded(-8.f),
+          engineRow.GetReducedFromLeft(406.f).GetFromLeft(150.f).GetVPadded(-10.f),
           sl::kVoices, "Voices", style, false, EDirection::Horizontal),
           kNoTag, "instrument");
       g->AttachControl(new IVToggleControl(
-          engineRow.GetReducedFromLeft(406.f).GetFromLeft(130.f).GetVPadded(-8.f),
+          engineRow.GetReducedFromLeft(566.f).GetFromLeft(120.f).GetVPadded(-10.f),
           sl::kMultitimbral, "Multitimbral", style, "Off", "On"),
           kNoTag, "instrument");
-      g->AttachControl(new ITextControl(
-          engineRow.GetReducedFromLeft(548.f),
-          "Oversampling changes the sound: zyn runs at the host rate, so 2x and 4x "
-          "shift band limiting and filter timing. Multitimbral gives each MIDI "
-          "channel its own part.",
-          IText(11.f, IColor(255, 110, 118, 130), nullptr, EAlign::Near)),
-          kNoTag, "instrument");
+      // One control per line: ITextControl draws its string with nvgText,
+      // which neither wraps nor honours a newline, so a paragraph here just
+      // runs off the edge of the window.
+      {
+        const IRECT hint = engineRow.GetReducedFromLeft(700.f);
+        const IText hintText(11.f, IColor(255, 110, 118, 130), nullptr, EAlign::Near);
+        g->AttachControl(new ITextControl(
+            hint.GetFromTop(16.f),
+            "Cutoff and Resonance reach notes that are already sounding.",
+            hintText), kNoTag, "instrument");
+        g->AttachControl(new ITextControl(
+            hint.GetReducedFromTop(18.f).GetFromTop(16.f),
+            "Oversampling changes the sound: zyn runs at the host rate.",
+            hintText), kNoTag, "instrument");
+        g->AttachControl(new ITextControl(
+            hint.GetReducedFromTop(36.f).GetFromTop(16.f),
+            "Multitimbral gives each MIDI channel its own part.",
+            hintText), kNoTag, "instrument");
+      }
     }
     // The scope draws its trace in kFG and its centre line in kSH, both of
     // which the dark palette sets to near-invisible greys. It looked like a
     // dead control until those two were given the accent instead.
     g->AttachControl(new IVScopeControl<1, 128>(
-        page.GetReducedFromTop(114.f), "Output",
+        page.GetReducedFromTop(108.f).GetFromTop(68.f), "Output",
         style.WithColor(kFG, kAccent).WithColor(kSH, IColor(255, 58, 65, 78))),
         kCtrlTagScope, "instrument");
+    {
+      auto* view = new seedlathe::InstrumentViewControl(
+          page.GetReducedFromTop(180.f),
+          [this]() -> const sl::Instrument& { return P().edit; });
+      g->AttachControl(view, kCtrlTagComponents, "instrument");
+      // Synced with the designer, so switching seed, preset or part repaints
+      // it without anything else having to remember it exists.
+      mDesignerControls.push_back(view);
+    }
 
     // -- Presets
     {
@@ -371,9 +408,11 @@ void Seedlathe::LoadStandaloneState()
 
 #if IPLUG_EDITOR
 namespace {
-const char* const kWaveNames[]   = {"Sin", "Sqr", "Saw", "Tri", "Nse"};
-const char* const kFilterNames[] = {"LP", "HP", "BP", "LS", "HS", "PK", "AP"};
-const char* const kOverNames[]   = {"1x", "2x", "4x"};
+// The name tables live in SeedlatheDesigner.h now, so the read-only view on
+// the Instrument tab names a waveform the same way the editor does.
+using seedlathe::dsn::kWaveNames;
+using seedlathe::dsn::kFilterNames;
+using seedlathe::dsn::kOverNames;
 
 int overIndex(int factor) { return factor >= 4 ? 2 : (factor >= 2 ? 1 : 0); }
 int overFactor(int index) { return index == 2 ? 4 : (index == 1 ? 2 : 1); }

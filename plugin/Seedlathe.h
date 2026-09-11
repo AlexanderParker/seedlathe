@@ -59,6 +59,7 @@ enum EControlTags
   kCtrlTagPartStrip,
   kCtrlTagSampleResults,
   kCtrlTagTabBar,
+  kCtrlTagComponents,
   kNumCtrlTags
 };
 

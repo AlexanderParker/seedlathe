@@ -46,6 +46,71 @@ inline IText Label(float h = 10.f, EAlign a = EAlign::Near) {
 inline IText Value(float h = 11.f, EAlign a = EAlign::Far) {
     return IText(h, kText, nullptr, a);
 }
+
+// Shared with the read-only view on the Instrument tab, so the two pictures of
+// the same instrument cannot drift apart.
+const char* const kWaveNames[]   = {"Sin", "Sqr", "Saw", "Tri", "Nse"};
+const char* const kFilterNames[] = {"LP", "HP", "BP", "LS", "HS", "PK", "AP"};
+const char* const kOverNames[]   = {"1x", "2x", "4x"};
+
+inline const char* WaveName(sl::Waveform w) {
+    const int i = static_cast<int>(w);
+    return (i >= 0 && i < 5) ? kWaveNames[i] : "?";
+}
+
+// The longest stage an envelope handle may be dragged to, and so the widest
+// the plot ever has to be.
+inline constexpr double kMaxEnvStage = 4.0;
+
+// The time axis a plot of `env` spans. A round bracket rather than a tight fit
+// so the picture does not rescale on every small change.
+inline double EnvWindow(const sl::Adsr& env) {
+    const double total = env.aT + env.dT + env.sT + env.rT;
+    for (double w : {0.5, 1.0, 2.0, 4.0, 8.0})
+        if (total <= w * 0.75) return w;
+    return 16.0;
+}
+
+// Where the envelope's stages land inside `plot`.
+//
+// px/py are five long: the origin, the three ramp ends, and the release. Index
+// 4 sits AFTER the sustain plateau, whose right edge comes back in sustainX --
+// a held note holds at the sustain level for as long as the key is down, and
+// four back-to-back ramps would draw an envelope no note ever produces.
+inline void EnvPoints(const IRECT& plot, const sl::Adsr& env, double win,
+                      float* px, float* py, float& sustainX) {
+    const double ts[4] = {env.aT, env.dT, env.sT, env.rT};
+    const double vs[5] = {0.0, env.aV, env.dV, env.sV, env.rV};
+    double t = 0.0;
+    for (int i = 0; i <= 3; ++i) {
+        px[i] = plot.L + plot.W() * static_cast<float>(std::min(t / win, 1.0));
+        py[i] = plot.B - plot.H() * static_cast<float>(std::clamp(vs[i], 0.0, 1.0));
+        t += ts[i];
+    }
+    // The plateau takes a fixed slice of the plot; it has no duration.
+    sustainX = px[3] + plot.W() * 0.12f;
+    px[4] = std::min(plot.R, sustainX + plot.W() * static_cast<float>(env.rT / win));
+    py[4] = plot.B - plot.H() * static_cast<float>(std::clamp(vs[4], 0.0, 1.0));
+}
+
+// The outline and the dotted sustain plateau. Handles, if any, are the
+// interactive control's business.
+inline void DrawEnvShape(IGraphics& g, const IRECT& plot, const sl::Adsr& env,
+                         double win, const IColor& line, float thickness = 1.5f) {
+    float px[5], py[5], sustainX = 0.f;
+    EnvPoints(plot, env, win, px, py, sustainX);
+
+    g.PathClear();
+    g.PathMoveTo(px[0], py[0]);
+    for (int i = 1; i <= 3; ++i) g.PathLineTo(px[i], py[i]);
+    g.PathLineTo(sustainX, py[3]);
+    g.PathLineTo(px[4], py[4]);
+    g.PathStroke(IPattern(line), thickness);
+
+    // The plateau again, dotted, so it reads as "held", not "ramped".
+    for (float x = px[3]; x < sustainX; x += 6.f)
+        g.FillRect(kAccent, IRECT(x, py[3] - 0.5f, std::min(x + 3.f, sustainX), py[3] + 0.5f));
+}
 } // namespace dsn
 
 // Every designer control re-reads its value from the model on Sync(). The tab
@@ -312,18 +377,7 @@ public:
 
         float px[5], py[5];
         Points(plot, px, py);
-
-        // Envelope outline, with the sustain plateau drawn between S and R.
-        g.PathClear();
-        g.PathMoveTo(px[0], py[0]);
-        for (int i = 1; i <= 3; ++i) g.PathLineTo(px[i], py[i]);
-        g.PathLineTo(mSustainX(plot), py[3]);
-        g.PathLineTo(px[4], py[4]);
-        g.PathStroke(IPattern(dsn::kFillHot), 1.5f);
-
-        // The plateau again, dotted, so it reads as "held", not "ramped".
-        for (float x = px[3]; x < mSustainX(plot); x += 6.f)
-            g.FillRect(dsn::kAccent, IRECT(x, py[3] - 0.5f, std::min(x + 3.f, mSustainX(plot)), py[3] + 0.5f));
+        dsn::DrawEnvShape(g, plot, mEnv, Window(), dsn::kFillHot);
 
         for (int i = 1; i <= 4; ++i) {
             const bool hot = (mHot == i);
@@ -386,44 +440,18 @@ public:
     }
 
 private:
-    static constexpr double kMaxStage = 4.0;
+    static constexpr double kMaxStage = dsn::kMaxEnvStage;
 
     IRECT Plot() const {
         return mRECT.GetPadded(-8.f).GetReducedFromTop(8.f).GetReducedFromBottom(10.f);
     }
 
-    // A round window rather than a tight fit, and frozen while dragging: the
-    // plot must not rescale under the cursor.
-    double Window() const {
-        if (mDragging) return mDragWindow;
-        const double total = mEnv.aT + mEnv.dT + mEnv.sT + mEnv.rT;
-        for (double w : {0.5, 1.0, 2.0, 4.0, 8.0})
-            if (total <= w * 0.75) return w;
-        return 16.0;
-    }
-
-    float mSustainX(const IRECT& plot) const {
-        // The plateau takes a fixed slice of the plot; it has no duration.
-        return plot.L + plot.W() * static_cast<float>(TimeAt(3) / Window()) + plot.W() * 0.12f;
-    }
-
-    double TimeAt(int stage) const {
-        double t = 0.0;
-        const double ts[4] = {mEnv.aT, mEnv.dT, mEnv.sT, mEnv.rT};
-        for (int i = 0; i < stage && i < 4; ++i) t += ts[i];
-        return t;
-    }
+    // Frozen while dragging: the plot must not rescale under the cursor.
+    double Window() const { return mDragging ? mDragWindow : dsn::EnvWindow(mEnv); }
 
     void Points(const IRECT& plot, float* px, float* py) const {
-        const double win = Window();
-        const double vs[5] = {0.0, mEnv.aV, mEnv.dV, mEnv.sV, mEnv.rV};
-        for (int i = 0; i <= 3; ++i) {
-            px[i] = plot.L + plot.W() * static_cast<float>(std::min(TimeAt(i) / win, 1.0));
-            py[i] = plot.B - plot.H() * static_cast<float>(std::clamp(vs[i], 0.0, 1.0));
-        }
-        // The release handle sits after the plateau.
-        px[4] = std::min(plot.R, mSustainX(plot) + plot.W() * static_cast<float>(mEnv.rT / win));
-        py[4] = plot.B - plot.H() * static_cast<float>(std::clamp(vs[4], 0.0, 1.0));
+        float sustainX = 0.f;
+        dsn::EnvPoints(plot, mEnv, Window(), px, py, sustainX);
     }
 
     int NearestHandle(float x, float y) const {
@@ -599,6 +627,211 @@ private:
     CountFunc mCount;
     SelectFunc mOnSelect;
     int mSel = 0;
+};
+
+// The whole instrument at a glance, read-only: one column per oscillator, and
+// the FM matrix beside them when there is one.
+//
+// The Design tab shows one oscillator at a time because editing needs room.
+// That makes it a poor way to ANSWER a question -- how many oscillators does
+// this seed have, which of them are distorted, where is the long reverb -- so
+// this draws all of them at once and lets nothing be dragged. It shares the
+// designer's colours and envelope drawing deliberately: the two are pictures
+// of the same thing and should read as the same thing.
+class InstrumentViewControl : public DesignerControl
+{
+public:
+    using GetFunc = std::function<const sl::Instrument&()>;
+
+    InstrumentViewControl(const IRECT& bounds, GetFunc get)
+    : DesignerControl(bounds), mGet(std::move(get)) {
+        mIgnoreMouse = true;
+    }
+
+    // Nothing is cached -- Draw reads the model -- so syncing is only a repaint.
+    void Sync() override { SetDirty(false); }
+
+    void Draw(IGraphics& g) override {
+        if (!mGet) return;
+        const sl::Instrument& inst = mGet();
+        const int n = std::clamp(inst.oscCount, 0, sl::kMaxOscs);
+        if (n == 0) return;
+
+        const int cols = n + (inst.hasFmMatrix ? 1 : 0);
+        // Capped, so a one-oscillator instrument gets a card rather than a
+        // banner stretched across the window -- and then centred, so the
+        // space left over reads as deliberate rather than as a layout that
+        // ran out halfway.
+        const float cw = std::min(340.f, mRECT.W() / float(cols));
+        const float x0 = mRECT.L + (mRECT.W() - cw * float(cols)) * 0.5f;
+
+        for (int i = 0; i < n; ++i)
+            DrawOsc(g, Column(x0, i, cw), inst, i);
+        if (inst.hasFmMatrix)
+            DrawMatrix(g, Column(x0, n, cw), inst, n);
+    }
+
+private:
+    IRECT Column(float x0, int i, float cw) const {
+        const float l = x0 + cw * float(i);
+        return IRECT(l + 3.f, mRECT.T, l + cw - 3.f, mRECT.B);
+    }
+
+    static void Badge(IGraphics& g, const IRECT& r, bool on, const char* name,
+                      const char* value) {
+        g.FillRoundRect(on ? IColor(255, 38, 52, 70) : IColor(255, 25, 27, 32),
+                        r, 2.f);
+        g.DrawText(IText(9.f, on ? dsn::kAccent : dsn::kOffText, nullptr, EAlign::Near),
+                   name, r.GetHPadded(-5.f));
+        if (on && value && *value)
+            g.DrawText(IText(9.f, dsn::kText, nullptr, EAlign::Far), value,
+                       r.GetHPadded(-5.f));
+    }
+
+    static void Env(IGraphics& g, const IRECT& r, const char* title,
+                    const sl::Adsr& env) {
+        g.DrawText(IText(9.f, dsn::kLabel, nullptr, EAlign::Near), title,
+                   r.GetFromTop(11.f));
+        const IRECT plot = r.GetReducedFromTop(11.f);
+        g.FillRect(dsn::kTrack, plot);
+        dsn::DrawEnvShape(g, plot.GetPadded(-2.f), env, dsn::EnvWindow(env),
+                          dsn::kFillHot, 1.f);
+    }
+
+    void DrawOsc(IGraphics& g, const IRECT& c, const sl::Instrument& inst, int i) const {
+        const sl::Osc& o = inst.oscs[static_cast<size_t>(i)];
+
+        g.FillRoundRect(dsn::kPanelBg, c, 4.f);
+        g.DrawRoundRect(dsn::kPanelEdge, c, 4.f, nullptr, 1.f);
+
+        const IRECT inner = c.GetHPadded(-8.f);
+        char buf[64];
+
+        std::snprintf(buf, sizeof(buf), "OSC %d", i + 1);
+        g.DrawText(IText(11.f, dsn::kText, nullptr, EAlign::Near), buf,
+                   inner.GetFromTop(16.f).GetVPadded(-1.f));
+        g.DrawText(IText(10.f, dsn::kAccent, nullptr, EAlign::Far),
+                   dsn::WaveName(o.waveform), inner.GetFromTop(16.f).GetVPadded(-1.f));
+
+        std::snprintf(buf, sizeof(buf), "oct %+d    detune %+.2f st", o.oct, o.detune);
+        g.DrawText(IText(9.f, dsn::kLabel, nullptr, EAlign::Near), buf,
+                   inner.GetReducedFromTop(16.f).GetFromTop(14.f));
+
+        const float envH = 64.f;
+        float y = 32.f;
+        Env(g, IRECT(inner.L, c.T + y, inner.R, c.T + y + envH), "GAIN", o.adsrGain);
+        y += envH + 2.f;
+        Env(g, IRECT(inner.L, c.T + y, inner.R, c.T + y + envH), "CUTOFF x 20 kHz",
+            o.adsrFilter);
+        y += envH + 2.f;
+        Env(g, IRECT(inner.L, c.T + y, inner.R, c.T + y + envH), "RESONANCE x 30 dB",
+            o.adsrFilterQ);
+        y += envH + 4.f;
+
+        // What is switched on, in the order the Design tab lists it.
+        struct Row { bool on; const char* name; char value[40]; };
+        Row rows[8]{};
+        int k = 0;
+
+        const auto lfo = [&](const sl::Lfo& l, const char* name, const char* unit,
+                             int decimals) {
+            rows[k].on = l.on;
+            rows[k].name = name;
+            if (l.on)
+                std::snprintf(rows[k].value, sizeof(rows[k].value), "%.2f Hz  %.*f%s",
+                              l.frequency, decimals, l.depth, unit);
+            ++k;
+        };
+        lfo(o.gLfo, "GAIN LFO", "", 3);
+        lfo(o.fLfo, "FILTER LFO", " Hz", 0);
+        lfo(o.pLfo, "PITCH LFO", " x f", 2);
+
+        rows[k].on = o.fm.on;
+        rows[k].name = "FM";
+        if (o.fm.on)
+            std::snprintf(rows[k].value, sizeof(rows[k].value), "%.3f x  %.1f Hz",
+                          o.fm.frequency, o.fm.depth);
+        ++k;
+
+        rows[k].on = o.pEnv.on;
+        rows[k].name = "PITCH ENV";
+        if (o.pEnv.on)
+            std::snprintf(rows[k].value, sizeof(rows[k].value), "%.3f x f", o.pEnv.amount);
+        ++k;
+
+        rows[k].on = o.dist.on;
+        rows[k].name = "DISTORTION";
+        if (o.dist.on)
+            std::snprintf(rows[k].value, sizeof(rows[k].value), "%.1f  %s",
+                          o.dist.amount,
+                          dsn::kOverNames[o.dist.oversample >= 4 ? 2
+                                          : (o.dist.oversample >= 2 ? 1 : 0)]);
+        ++k;
+
+        rows[k].on = o.del.on;
+        rows[k].name = "DELAY";
+        if (o.del.on)
+            std::snprintf(rows[k].value, sizeof(rows[k].value), "%.3f s  %.2f",
+                          o.del.time, o.del.feedback);
+        ++k;
+
+        rows[k].on = o.verb.on;
+        rows[k].name = "REVERB";
+        if (o.verb.on)
+            std::snprintf(rows[k].value, sizeof(rows[k].value), "%.2f s  %.2f",
+                          o.verb.duration, o.verb.decay);
+        ++k;
+
+        const float rowH = 12.f;
+        for (int r = 0; r < k; ++r) {
+            const IRECT b(inner.L, c.T + y + rowH * float(r),
+                          inner.R, c.T + y + rowH * float(r + 1) - 1.f);
+            if (b.B > c.B) break;
+            Badge(g, b, rows[r].on, rows[r].name, rows[r].value);
+        }
+    }
+
+    static void DrawMatrix(IGraphics& g, const IRECT& c, const sl::Instrument& inst,
+                           int n) {
+        g.FillRoundRect(dsn::kPanelBg, c, 4.f);
+        g.DrawRoundRect(dsn::kPanelEdge, c, 4.f, nullptr, 1.f);
+
+        const IRECT inner = c.GetHPadded(-8.f);
+        g.DrawText(IText(11.f, dsn::kText, nullptr, EAlign::Near), "FM MATRIX",
+                   inner.GetFromTop(16.f).GetVPadded(-1.f));
+        g.DrawText(IText(9.f, dsn::kOffText, nullptr, EAlign::Near),
+                   "rows modulate columns",
+                   inner.GetReducedFromTop(16.f).GetFromTop(12.f));
+
+        // Square, so the cells stay readable however tall the card is.
+        const float side = std::min(inner.W(), c.H() - 40.f);
+        const IRECT grid(inner.L, c.T + 32.f, inner.L + side, c.T + 32.f + side);
+        const float cell = side / float(std::max(1, n));
+
+        for (int src = 0; src < n; ++src) {
+            for (int tgt = 0; tgt < n; ++tgt) {
+                const IRECT r(grid.L + cell * float(tgt), grid.T + cell * float(src),
+                              grid.L + cell * float(tgt + 1), grid.T + cell * float(src + 1));
+                const double v = inst.fmMatrix[static_cast<size_t>(src)]
+                                              [static_cast<size_t>(tgt)];
+                g.FillRect(dsn::kTrack, r.GetPadded(-1.f));
+                if (v != 0.0) {
+                    const float mid = r.MH();
+                    const float h = r.H() * 0.5f * static_cast<float>(std::min(std::fabs(v), 1.0));
+                    g.FillRect(v > 0.0 ? dsn::kFillHot : IColor(255, 214, 118, 96),
+                               v > 0.0 ? IRECT(r.L + 2.f, mid - h, r.R - 2.f, mid)
+                                       : IRECT(r.L + 2.f, mid, r.R - 2.f, mid + h));
+                }
+                char buf[16];
+                std::snprintf(buf, sizeof(buf), "%.2f", v);
+                g.DrawText(IText(9.f, v == 0.0 ? dsn::kOffText : dsn::kText,
+                                 nullptr, EAlign::Center), buf, r);
+            }
+        }
+        g.DrawRect(dsn::kPanelEdge, grid, nullptr, 1.f);
+    }
+
+    GetFunc mGet;
 };
 
 } // namespace seedlathe
