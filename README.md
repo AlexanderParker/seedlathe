@@ -1,55 +1,134 @@
 # Seedlathe
 
-A seed-driven procedural synthesizer plugin (VST3 / CLAP / standalone), built on
-[zyn.js](https://github.com/alexanderparker/zyn).
+**Every whole number is an instrument.**
 
-Type or roll a 32-bit integer and get a complete instrument. The same seed sounds the
-same here as it does on the zyn demo page — enforced by automated tests, not by ear.
+`3703184240` is a slow breathing pad. `2360196101` is a hard square lead.
+`1671058337` is a short blipping kick. There are four billion more, and none
+of them are stored anywhere — the number *is* the patch, and the synth builds
+the instrument from it the moment you type it in.
 
-## What it does
+A VST3 / CLAP / standalone synthesizer, built on
+[zyn.js](https://github.com/AlexanderParker/zyn).
 
-- **Seeds.** Type, drag or roll a seed; the whole 32-bit value is one control, even
-  though the host sees it as two parameters (see `plugin/SeedlatheParams.h` for why).
-- **Similarity search.** Finds seeds close to the current instrument at around 1.6
-  million candidates a second, and keeps the twenty best so the near misses can be
-  auditioned too — they are often the ones worth keeping.
-- **Sample match.** Load a recording and search for the seed that sounds most like it.
-  Each candidate is rendered offline and compared on timbre, amplitude shape and
-  brightness, which runs at hundreds of candidates a second rather than millions.
-  Each band's own noise floor is estimated and subtracted before comparison, so a
-  recorded sample works and not only a rendered one — at 20 dB SNR the right seed
-  still lands in the top ten of the factory bank. Scores drop as noise rises, which
-  is the honest signal: the match really is looser, so a threshold still means
-  something.
-- **Live modulation.** Cutoff and Resonance ride on top of every oscillator's filter
-  envelope and reach notes that are already sounding — the only two parameters that
-  do, since everything else about a seed is scheduled at note-on. Both are host
-  parameters, so they automate. At their defaults they are exactly zero-sum and the
-  render is bit-identical to one without them. zyn.js gained the same control as
-  `Z.setFilterMod`.
-- **Instrument overview.** The Instrument tab draws every oscillator the seed
-  produced at once — envelopes, what is switched on, the FM matrix — read-only, for
-  answering "what is this" without clicking through the designer one slot at a time.
-- **Undo.** Back and Next step through the sounds visited on the current part: seeds,
-  presets, search results, pasted patches and reverts, with the designer edits each
-  carried.
-- **Designer.** Edit any generated instrument directly: five oscillators, draggable
-  envelopes, three LFOs, FM, pitch envelope, distortion, per-oscillator delay and
-  reverb, and the 5×5 FM matrix. Patches copy and paste as zyn's own JSON.
-- **Presets.** 115 factory presets from the demo page, plus your own bank.
-- **Multitimbral.** Sixteen parts, one per MIDI channel, allocated as you use them.
-- **Settings.** Engine and MIDI options -- oversampling, polyphony, multitimbral and
-  the part strip -- live on their own tab, so the header holds only what you reach for
-  while playing.
-- **Oversampling.** 2× or 4×, off by default — it is a deviation from zyn, which runs
-  its graph at the host rate.
-- **Export.** Render the current instrument to a 32-bit float stereo WAV.
+---
 
-- Design: [`docs/superpowers/specs/2026-08-17-seedlathe-vst-design.md`](docs/superpowers/specs/2026-08-17-seedlathe-vst-design.md)
-- Current plan: [`docs/superpowers/plans/2026-08-17-seedlathe-p0-p1-engine.md`](docs/superpowers/plans/2026-08-17-seedlathe-p0-p1-engine.md)
-- Performance baseline: [`docs/performance.md`](docs/performance.md)
+## The idea
 
-## Layout
+Most synths start you at a default patch and ask you to build something. This
+one starts you in the middle of four billion finished instruments and asks you
+to go looking.
+
+That changes what the work feels like. You are not dialling in an oscillator,
+you are **hunting** — rolling, listening, rejecting, and occasionally stopping
+dead because the thing that just came out of the speakers is better than
+anything you would have thought to build.
+
+And because a sound is just a number, a patch is something you can say out
+loud. Text someone `3703184240` and they have your pad — in the plugin, or on
+[the web demo](https://alexanderparker.github.io/zyn/), which sounds the same.
+No file, no version, no "which preset pack was that in".
+
+## Finding something
+
+**Roll the dice.** Hit Random. If you want a particular flavour, set the roll
+type first — Pad, Lead, Bass, Key, Pluck, Bell, String, Drum, Perc, FX — and
+every roll stays in that family.
+
+**Find more like this one.** Land on something promising but not quite right?
+Find Similar searches about 1.6 million instruments a second and keeps the
+twenty closest. The near misses are usually the interesting part: the one you
+keep is often three rows down the list, not at the top.
+
+**Hum it, or hand it a record.** Load a WAV on the Sample tab and Seedlathe
+goes looking for the seed that sounds most like it. Every candidate is
+actually rendered and compared on timbre, attack and brightness, so it works
+on a real recording and not only on something the synth made itself.
+
+**Or start from the shelf.** 115 factory presets, plus your own bank.
+
+Nothing you find gets lost on the way: **Back** and **Next** step through every
+sound you have visited, so the one you liked two rolls ago is one click away.
+
+## Making it yours
+
+Open the Design tab and the instrument comes apart: up to five oscillators,
+draggable envelopes, three LFOs each, FM, pitch envelopes, distortion, and
+per-oscillator delay and reverb. Drag anything and you hear it immediately.
+The 5×5 FM matrix lets any oscillator modulate any other.
+
+Patches copy and paste as plain JSON, so you can keep one in a text file or
+paste it to somebody.
+
+If you go too far, **Revert to seed** puts it back.
+
+## Playing it
+
+**Cutoff** and **Resonance** in the header reach notes that are *already
+sounding* — hold a chord and sweep them. Everything else about a seed is fixed
+the moment a note starts, so these two are the performance controls. Both are
+host parameters, so your DAW can automate them.
+
+It responds to velocity, the sustain pedal, pitch bend and program change.
+Turn on **Multitimbral** in Settings and each MIDI channel gets its own
+instrument, sixteen of them at once.
+
+**Export** renders whatever you are playing to a stereo WAV.
+
+## Getting it
+
+There is no download yet — you build it. On Windows you need Visual Studio
+2022 with the C++ desktop workload, and Node 22.
+
+```bash
+git clone --recurse-submodules https://github.com/AlexanderParker/seedlathe
+cd seedlathe/third_party/iPlug2/Dependencies/IPlug
+bash ./download-clap-sdks.sh
+bash ./download-vst3-sdk.sh
+```
+
+Those two scripts are **not optional** — the SDK folders ship as empty
+placeholders, so without them you get a build with no VST3 or CLAP target.
+
+```bash
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
+```
+
+Everything lands in `build/out/`.
+
+**To just play with it:** run `build/out/Seedlathe.exe` and click the on-screen
+keyboard — it needs no MIDI controller. If you hear nothing, open Preferences
+and pick your audio device.
+
+**To use it in a DAW:** run `tools\install-plugins.cmd`. It asks for
+administrator access itself and copies the plugin where every other plugin on
+the machine lives. Re-run it after each rebuild, then rescan in your DAW.
+
+> **If your DAW cannot see it**, the cause is usually not the plugin. FL Studio
+> records a plugin *class* against each search folder, and a folder you add by
+> hand is registered as VST2 — so it looks inside for VST2 DLLs, sees a folder
+> named `Seedlathe.vst3`, doesn't recognise it, and skips it silently. That is
+> what the installer above sidesteps.
+
+You can also render a seed straight to a file without opening anything:
+
+```
+build/out/sl_render.exe 3703184240 forest.wav --seconds 3
+```
+
+## A word of warning
+
+Sounds are generated, not curated. Most are pleasant, some are dull, and every
+so often one is **very** loud or very harsh. Keep the volume somewhere
+forgiving while you are rolling.
+
+---
+
+## Under the hood
+
+Everything below is for people working on the code rather than playing it.
+
+### Layout
 
 | Path | Responsibility |
 |---|---|
@@ -59,141 +138,14 @@ same here as it does on the zyn demo page — enforced by automated tests, not b
 | `tests/` | Catch2 unit tests and the fidelity null-test |
 | `vectors/` | Committed golden JSON and reference WAVs |
 
-## Building on Windows
+Run the tests with `ctest --test-dir build -C Release --output-on-failure`.
 
-Requires Visual Studio 2022 (or newer) with the C++ desktop workload, and Node 22 for
-the `tools/` scripts.
+### Fidelity
 
-```bash
-git clone --recurse-submodules <repo> seedlathe
-cd seedlathe/third_party/iPlug2/Dependencies/IPlug
-bash ./download-clap-sdks.sh
-bash ./download-vst3-sdk.sh
-```
-
-Those two scripts are **not optional and not captured by the submodule pointer** — the
-SDK directories ship as empty placeholders holding only a readme, so a fresh
-`--recurse-submodules` clone will configure without CLAP or VST3 targets until you run
-them. The prebuilt-libs download (`Dependencies/download-prebuilt-libs.sh`) is *not*
-needed: IGraphics uses its default NanoVG backend, which has no external dependencies.
-
-Then, from the repo root:
-
-```bash
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Debug
-ctest --test-dir build -C Debug --output-on-failure
-```
-
-Artefacts land in `build/out/`.
-
-**Note:** iPlug2 copies the built VST3 and CLAP into
-`%LOCALAPPDATA%/Programs/Common/VST3` and `.../CLAP` as a post-build step, so the
-plugin appears in your DAW's scan after every build.
-
-## How This Was Built
-
-[zyn.js](https://github.com/AlexanderParker/zyn) came first, and its synth core
-was written by hand. This C++ port was not: Seedlathe was written by Claude
-(Anthropic's Claude Code), working from that library, under my direction and
-review.
-
-That is a claim worth being able to check rather than take on trust, which is
-why the fidelity testing below exists. A port is only worth anything if a seed
-sounds the same in both, so the suite renders seeds through both engines and
-compares them, and the golden vectors in `vectors/` are committed so anyone can
-re-run it. The commit history records which changes were AI-written; nearly all
-of them were.
-
-## Licensing
-
-- zyn core algorithm: MIT
-- iPlug2: WDL/zlib-style permissive
-- CLAP: MIT
-- **VST3 target requires Steinberg's VST3 SDK** (dual GPLv3 / proprietary). The
-  proprietary option is free but requires signing Steinberg's agreement. Settle this
-  before distributing any VST3 binary; CLAP and standalone are unaffected.
-
-## Running it
-
-Three ways, in increasing order of setup.
-
-### 1. Render a seed to a WAV (no DAW, no MIDI needed)
-
-```
-build/out/sl_render.exe 3703184240 forest.wav --seconds 3
-```
-
-Options: `--note N` (0 is middle C), `--gain G` (0..1), `--seconds S`,
-`--rate R`, `--json` to also print the generated instrument.
-
-This is the quickest way to A/B against
-[the demo page](https://alexanderparker.github.io/zyn/) — load the same seed
-there and compare.
-
-### 2. Standalone app
-
-Run `build/out/Seedlathe.exe`. **Click the on-screen keyboard** to play —
-it sends real MIDI internally, so no controller is required.
-
-The seed box at the top left takes the whole 32-bit value: click to type, drag to
-nudge, wheel to step, shift for coarse and ctrl for fine. The host still sees two
-16-bit parameters underneath (`seed = SeedHi * 65536 + SeedLo`, so 3703184240 is
-`Seed Hi 56506`, `Seed Lo 7024`), because a single float32 automation value cannot
-round-trip a 32-bit integer.
-
-If you hear nothing, open the app's **Preferences** dialog and pick the right
-audio output device and sample rate.
-
-The standalone keeps its own state — seed, designer edits, parts, settings — in
-`%LOCALAPPDATA%/Seedlathe/standalone.state`, written a couple of seconds after
-anything changes and read back on launch. Delete that file to start from defaults.
-
-### 3. In a DAW
-
-Every build copies the plugin into the **per-user** plugin folders:
-
-- VST3: `%LOCALAPPDATA%\Programs\Common\VST3\Seedlathe.vst3`
-- CLAP: `%LOCALAPPDATA%\Programs\Common\CLAP\Seedlathe.clap`
-
-Some hosts do not scan those. Run this once from an **elevated** prompt to
-install alongside every other plugin on the machine instead:
-
-```
-tools\install-plugins.cmd
-```
-
-Re-run it after each rebuild, or replace the copy with a junction so rebuilds
-go live on their own:
-
-```
-mklink /J "C:\Program Files\Common Files\VST3\Seedlathe.vst3" ^
-          "<repo>\build\out\Seedlathe.vst3"
-```
-
-**If a host still cannot see it**, the usual cause is not the plugin. FL Studio
-records a plugin *class* against every search folder, and a folder added by
-hand through its Plugin Manager is registered as VST2. It then scans that
-folder for VST2 DLLs, sees a directory named `Seedlathe.vst3`, does not
-recognise it, and skips it — silently, with "verify plugins" ticked and
-nothing in the log. The machine-wide folders are already registered with the
-right classes, which is why installing there sidesteps it.
-
-Rescan plugins in your DAW, add Seedlathe to an instrument track, and play.
-It responds to note on/off, velocity, all-notes-off, the sustain pedal (CC 64)
-the pitch wheel (±2 semitones, the MIDI default) and program change, which
-selects a factory preset by number.
-
-With **Multitimbral** on (Instrument page), the MIDI channel selects the part, and a
-channel whose part has not been allocated yet is silent — click its number in the part
-strip to bring it up. Only part 1's seed is a host parameter; the rest travel in the
-state chunk, so they survive save and reload but cannot be automated.
-
-## Fidelity
-
-The acceptance gate is `tests/test_fidelity.cpp`: 60 seeds rendered by this engine and
-by real Chrome through an `OfflineAudioContext`, compared as log-mel spectrograms and
-RMS envelopes. Both one-shot notes and held notes are covered.
+The whole project rests on one claim: a seed sounds the same here as it does in
+zyn.js. That is a test, not an aspiration. `tests/test_fidelity.cpp` renders 60
+seeds through this engine and through real Chrome via an `OfflineAudioContext`,
+and compares them as log-mel spectrograms and RMS envelopes.
 
 | Set | Seeds | Mean mel distance | Threshold |
 |---|---|---|---|
@@ -202,3 +154,33 @@ RMS envelopes. Both one-shot notes and held notes are covered.
 
 Regenerate the references with `node tools/export-reference-audio.mjs` (add
 `--sustained` for the held-note set). Both need Chrome and `puppeteer-core`.
+
+Two deliberate divergences are worth knowing about. **Oversampling** (2× / 4×,
+off by default) changes the sound rather than only cleaning it up, because a
+seed is defined at the host rate. And **Cutoff / Resonance** are additions zyn
+never had — at their defaults they are exactly zero-sum, and a test asserts the
+unmodulated render is bit-identical rather than merely close.
+
+Design notes: [`docs/superpowers/specs/`](docs/superpowers/specs/) ·
+performance baseline: [`docs/performance.md`](docs/performance.md)
+
+### How this was built
+
+[zyn.js](https://github.com/AlexanderParker/zyn) came first, and its synth core
+was written by hand. This C++ port was not: Seedlathe was written by Claude
+(Anthropic's Claude Code), working from that library, under my direction and
+review.
+
+That is a claim worth being able to check rather than take on trust, which is
+what the fidelity testing above is for. The commit history records which
+changes were AI-written; nearly all of them were.
+
+### Licensing
+
+- zyn core algorithm: MIT
+- iPlug2: WDL/zlib-style permissive
+- CLAP: MIT
+- **The VST3 target requires Steinberg's VST3 SDK** (dual GPLv3 / proprietary).
+  The proprietary option is free but requires signing Steinberg's agreement.
+  Settle this before distributing any VST3 binary; CLAP and standalone are
+  unaffected.
