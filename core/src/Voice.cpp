@@ -79,11 +79,10 @@ void Voice::noteOn(SharedFxRack* rack, const Instrument& inst, int note,
     startStamp_ = ++g_stamp;
     WaPanner::gains(0.0, panL_, panR_);
 
-    // Start on the current modulation rather than gliding onto it. An idle
+    // Start on the current settings rather than gliding onto them. An idle
     // voice's smoother is frozen wherever its last note left it, so without
     // this a note struck after a cutoff sweep would open from the old value.
-    cutoffMod_ = cutoffModTarget_;
-    resMod_ = resModTarget_;
+    now_ = target_;
 
     const int n = inst_.oscCount;
     // zyn: voiceGain = 1 / (notes * oscs), and layer.gain = 0.5 * gain.
@@ -123,6 +122,9 @@ void Voice::noteOn(SharedFxRack* rack, const Instrument& inst, int note,
                                 scheduleAdsr(s.qEnv, 0.0, c.adsrFilterQ, 30.0));
         }
         s.releaseTime = c.adsrGain.rT;
+        // The level the filter envelope settles at, which the envelope
+        // amount macro swings the rest of the envelope about.
+        s.filterSustain = c.adsrFilter.sV * 20000.0;
 
         // The pitch envelope REPLACES the oscillator frequency rather than
         // offsetting it: zyn schedules setValueAtTime(0) then ramps to
@@ -224,11 +226,18 @@ void Voice::noteOff() {
     sustainHeld_ = false;
     released_ = true;
     releaseStart_ = t_;
+
+    // Captured now, not read per sample: a note already fading must keep the
+    // length it started with, or moving the control mid-fade would stretch a
+    // release that is halfway done.
+    releaseScale_ = target_.release;
+
     // zyn's Z.noteOff: ramp from the current value to zero over the
     // instrument's release, with a small minimum to prevent a click.
     double r = 0.015;
     for (int i = 0; i < inst_.oscCount; ++i)
-        r = std::max(r, std::max(oscs_[static_cast<size_t>(i)].releaseTime, 0.015));
+        r = std::max(r, std::max(oscs_[static_cast<size_t>(i)].releaseTime * releaseScale_,
+                                 0.015));
     releaseLen_ = r;
 }
 
@@ -264,8 +273,10 @@ void Voice::renderOscillator(int oscIndex, int frames, int outOffset,
             double freq = s.hasPitchEnv ? s.pitchEnv.nextValue() : s.baseFreq;
 
             // Connected AudioParam inputs sum on top of the automation value.
-            if (s.hasPLfo) freq += s.pLfo.render(c.pLfo.frequency) * s.pLfoDepth;
-            if (s.hasFm) freq += s.fmOsc.render(s.fmFreq) * s.fmDepth;
+            if (s.hasPLfo)
+                freq += s.pLfo.render(c.pLfo.frequency * now_.lfoRate) *
+                        s.pLfoDepth * now_.lfoDepth;
+            if (s.hasFm) freq += s.fmOsc.render(s.fmFreq) * s.fmDepth * now_.fmDepth;
 
             for (int e = 0; e < edgeCount; ++e) {
                 const FmEdge& edge = *edges[e];
@@ -273,7 +284,7 @@ void Voice::renderOscillator(int oscIndex, int frames, int outOffset,
                 while (idx < 0) idx += kMaxFmDelaySamples;
                 idx %= kMaxFmDelaySamples;
                 freq += fmHistory_[static_cast<size_t>(edge.src)]
-                                  [static_cast<size_t>(idx)] * edge.gain;
+                                  [static_cast<size_t>(idx)] * edge.gain * now_.fmDepth;
             }
 
             // One multiply, unconditionally: the branch that would skip it
@@ -290,16 +301,28 @@ void Voice::renderOscillator(int oscIndex, int frames, int outOffset,
         if (s.useShaper) sample = s.shaper.process(sample);
 
         double cutoff = s.filterEnv.nextValue();
-        if (s.hasFLfo) cutoff += s.fLfo.render(c.fLfo.frequency) * s.fLfoDepth;
+        // The envelope's swing about the level it settles at.
+        //
+        // The guard is belt and braces rather than load-bearing: a mutation
+        // test that removed it still rendered bit-identically, because
+        // `base + (x - base)` does round-trip exactly for the magnitudes
+        // involved here. IEEE does not promise that in general, and an
+        // untouched voice has to match zyn.js sample for sample, so the
+        // neutral case stays structurally neutral instead of relying on it.
+        if (now_.filterEnvAmount != 1.0)
+            cutoff = s.filterSustain + (cutoff - s.filterSustain) * now_.filterEnvAmount;
+        if (s.hasFLfo)
+            cutoff += s.fLfo.render(c.fLfo.frequency * now_.lfoRate) *
+                      s.fLfoDepth * now_.lfoDepth;
         // Live modulation goes on last, after the LFO, because Web Audio's
         // detune scales the COMPUTED frequency -- automation plus every
         // connected input -- not the automation alone.
-        cutoff *= cutoffMod_;
+        cutoff *= now_.cutoffRatio;
         // Q from the envelope is 0..30 dB, so the clamp only ever bites once
         // the user has moved the resonance control. +40 dB is a lowpass
         // resonance of 100; beyond that the peak is loud enough to be a
         // hazard rather than a sound.
-        const double q = std::clamp(s.qEnv.nextValue() + resMod_, -30.0, 40.0);
+        const double q = std::clamp(s.qEnv.nextValue() + now_.resonanceDb, -30.0, 40.0);
         // Coefficients are refreshed every kCoeffInterval samples. Recomputing
         // them costs about seven times the filtering itself -- two
         // transcendentals plus a pow -- and the envelopes driving cutoff and Q
@@ -315,7 +338,9 @@ void Voice::renderOscillator(int oscIndex, int frames, int outOffset,
         sample = s.filter.process(sample);
 
         double g = s.gainEnv.nextValue();
-        if (s.hasGLfo) g += s.gLfo.render(c.gLfo.frequency) * s.gLfoDepth;
+        if (s.hasGLfo)
+            g += s.gLfo.render(c.gLfo.frequency * now_.lfoRate) *
+                 s.gLfoDepth * now_.lfoDepth;
         g *= releaseMul[i];
         sample *= g;
 
@@ -346,8 +371,14 @@ void Voice::processBlock(int frames) {
         // steps, and without the scaling the glide would finish 32x early.
         {
             const double a = std::min(1.0, modCoefPerSample_ * double(n));
-            cutoffMod_ += (cutoffModTarget_ - cutoffMod_) * a;
-            resMod_ += (resModTarget_ - resMod_) * a;
+            now_.cutoffRatio += (target_.cutoffRatio - now_.cutoffRatio) * a;
+            now_.resonanceDb += (target_.resonanceDb - now_.resonanceDb) * a;
+            now_.filterEnvAmount += (target_.filterEnvAmount - now_.filterEnvAmount) * a;
+            now_.lfoDepth += (target_.lfoDepth - now_.lfoDepth) * a;
+            now_.fmDepth += (target_.fmDepth - now_.fmDepth) * a;
+            // Rate needs no smoothing: the LFOs are phase-continuous, so a
+            // change of frequency has no discontinuity to smooth away.
+            now_.lfoRate = target_.lfoRate;
         }
 
         // Release ramps and end-of-note detection. releaseLen_ is the LONGEST
@@ -366,7 +397,8 @@ void Voice::processBlock(int frames) {
             for (int o = 0; o < inst_.oscCount; ++o) {
                 double mul = 1.0;
                 if (released_) {
-                    const double r = std::max(oscs_[static_cast<size_t>(o)].releaseTime, 0.015);
+                    const double r = std::max(
+                        oscs_[static_cast<size_t>(o)].releaseTime * releaseScale_, 0.015);
                     mul = 1.0 - (t - releaseStart_) / r;
                     if (mul < 0.0) mul = 0.0;
                 }
@@ -409,11 +441,9 @@ void VoicePool::prepare(double sampleRate, int maxVoices) {
     mixR_.assign(SharedFxRack::kMaxBlock, 0.0f);
     for (auto& v : voices_) v.prepare(sampleRate);
 
-    // Fresh voices start unmodulated, so the cache has to agree or the next
-    // setFilterMod would early-out and leave them there.
-    cutoffSemis_ = 0.0;
-    resonanceDb_ = 0.0;
-    cutoffRatio_ = 1.0;
+    // Fresh voices start neutral, so the cache has to agree or the next
+    // setMacros would early-out and leave them there.
+    macros_ = VoiceMacros{};
 }
 
 void VoicePool::noteOn(SharedFxRack* rack, const Instrument& inst, int note,
@@ -445,14 +475,20 @@ void VoicePool::noteOff(int note) {
     }
 }
 
-void VoicePool::setFilterMod(double cutoffSemitones, double resonanceDb) {
-    if (cutoffSemitones == cutoffSemis_ && resonanceDb == resonanceDb_) return;
-    cutoffSemis_ = cutoffSemitones;
-    resonanceDb_ = resonanceDb;
-    cutoffRatio_ = std::pow(2.0, cutoffSemitones / 12.0);
+void VoicePool::setMacros(const VoiceMacros& m) {
+    const bool same = m.cutoffRatio == macros_.cutoffRatio &&
+                      m.resonanceDb == macros_.resonanceDb &&
+                      m.filterEnvAmount == macros_.filterEnvAmount &&
+                      m.lfoRate == macros_.lfoRate &&
+                      m.lfoDepth == macros_.lfoDepth &&
+                      m.fmDepth == macros_.fmDepth &&
+                      m.release == macros_.release;
+    if (same) return;
+
+    macros_ = m;
     // Every voice, not only the sounding ones: an idle voice recycled by the
     // next note-on would otherwise start on whatever it last held.
-    for (auto& v : voices_) v.setFilterMod(cutoffRatio_, resonanceDb_);
+    for (auto& v : voices_) v.setMacros(macros_);
 }
 
 void VoicePool::setPitchBend(double semitones) {

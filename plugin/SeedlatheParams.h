@@ -23,6 +23,15 @@ enum ParamIdx {
     // the same control the same way.
     kFilterCutoff,
     kFilterRes,    // dB added to the Q envelope; Web Audio's lowpass Q is in dB
+
+    // The rest of the live set. One control each across every oscillator
+    // rather than one per source: an instrument carries up to fifteen LFOs,
+    // and nobody automates fifteen of anything.
+    kFilterEnvAmount,   // how far the filter envelope swings, 0 = held still
+    kLfoRate,           // multiplies every LFO's frequency
+    kLfoDepth,          // multiplies every LFO's depth
+    kFmDepth,           // multiplies FM depth, per-oscillator and matrix alike
+    kRelease,           // multiplies every oscillator's release
     kNumParams
 };
 

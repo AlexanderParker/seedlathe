@@ -118,6 +118,15 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
   GetParam(sl::kFilterCutoff)->InitDouble("Cutoff", 0., -48., 48., 0.01, "st");
   GetParam(sl::kFilterRes)->InitDouble("Resonance", 0., -30., 30., 0.01, "dB");
 
+  // Every one of these is neutral at its default, and the defaults are what
+  // a fresh instance has -- so a project that never touches them renders
+  // exactly what it rendered before they existed.
+  GetParam(sl::kFilterEnvAmount)->InitDouble("Filter Env", 100., 0., 200., 0.1, "%");
+  GetParam(sl::kLfoRate)->InitDouble("LFO Rate", 100., 25., 400., 0.1, "%");
+  GetParam(sl::kLfoDepth)->InitDouble("LFO Depth", 100., 0., 200., 0.1, "%");
+  GetParam(sl::kFmDepth)->InitDouble("FM Depth", 100., 0., 200., 0.1, "%");
+  GetParam(sl::kRelease)->InitDouble("Release", 100., 10., 400., 0.1, "%");
+
   for (auto& slot : mPendingProgram) slot.store(-1, std::memory_order_relaxed);
 
   // Two instances constructed in the same tick would otherwise roll the same
@@ -292,16 +301,45 @@ Seedlathe::Seedlathe(const InstanceInfo& info)
                                       IText(12.f, kDim)), kNoTag, "instrument");
     g->AttachControl(new ITextControl(page.GetReducedFromTop(18.f).GetFromTop(26.f), "",
                                       IText(19.f, kTextCol)), kCtrlTagTypeLabel, "instrument");
+    // The live set, all of it, in one row.
+    //
+    // Cutoff and Resonance are also in the header, where they are always to
+    // hand; repeating them here is deliberate, because these seven are one
+    // group -- everything that reaches a note already sounding -- and
+    // showing five of them apart from the other two would hide that.
+    {
+      const IRECT row = page.GetReducedFromTop(48.f).GetFromTop(74.f);
+      g->AttachControl(new ITextControl(row.GetFromTop(11.f).GetHPadded(-2.f),
+          "LIVE CONTROLS  -  these reach notes that are already sounding",
+          IText(10.f, IColor(255, 120, 130, 145), nullptr, EAlign::Near)),
+          kNoTag, "instrument");
+
+      const IRECT knobRow = row.GetReducedFromTop(11.f).GetFromLeft(700.f);
+      const struct { int param; const char* label; } kMacros[] = {
+          {sl::kFilterCutoff,    "Cutoff"},
+          {sl::kFilterRes,       "Resonance"},
+          {sl::kFilterEnvAmount, "Filter Env"},
+          {sl::kLfoRate,         "LFO Rate"},
+          {sl::kLfoDepth,        "LFO Depth"},
+          {sl::kFmDepth,         "FM Depth"},
+          {sl::kRelease,         "Release"},
+      };
+      for (int i = 0; i < 7; ++i)
+        g->AttachControl(new IVKnobControl(
+            knobRow.GetGridCell(i, 1, 7).GetPadded(-3.f),
+            kMacros[i].param, kMacros[i].label, style), kNoTag, "instrument");
+    }
+
     // The scope draws its trace in kFG and its centre line in kSH, both of
     // which the dark palette sets to near-invisible greys. It looked like a
     // dead control until those two were given the accent instead.
     g->AttachControl(new IVScopeControl<1, 128>(
-        page.GetReducedFromTop(50.f).GetFromTop(90.f), "Output",
+        page.GetReducedFromTop(128.f).GetFromTop(58.f), "Output",
         style.WithColor(kFG, kAccent).WithColor(kSH, IColor(255, 58, 65, 78))),
         kCtrlTagScope, "instrument");
     {
       auto* view = new seedlathe::InstrumentViewControl(
-          page.GetReducedFromTop(148.f),
+          page.GetReducedFromTop(192.f),
           [this]() -> const sl::Instrument& { return P().edit; });
       g->AttachControl(view, kCtrlTagComponents, "instrument");
       // Synced with the designer, so switching seed, preset or part repaints
@@ -2150,10 +2188,16 @@ void Seedlathe::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
   // this thread anyway, and a block boundary is exactly the granularity the
   // voices smooth from. Applied to every allocated part, sounding or not --
   // a part that starts a note later this block must already be in step.
-  const double modCutoff = GetParam(sl::kFilterCutoff)->Value();
-  const double modRes = GetParam(sl::kFilterRes)->Value();
+  sl::VoiceMacros macros;
+  macros.cutoffRatio = std::pow(2.0, GetParam(sl::kFilterCutoff)->Value() / 12.0);
+  macros.resonanceDb = GetParam(sl::kFilterRes)->Value();
+  macros.filterEnvAmount = GetParam(sl::kFilterEnvAmount)->Value() * 0.01;
+  macros.lfoRate = GetParam(sl::kLfoRate)->Value() * 0.01;
+  macros.lfoDepth = GetParam(sl::kLfoDepth)->Value() * 0.01;
+  macros.fmDepth = GetParam(sl::kFmDepth)->Value() * 0.01;
+  macros.release = GetParam(sl::kRelease)->Value() * 0.01;
   for (auto& part : mParts)
-    if (part.allocated) part.pool.setFilterMod(modCutoff, modRes);
+    if (part.allocated) part.pool.setMacros(macros);
 
   for (auto& part : mParts)
   {

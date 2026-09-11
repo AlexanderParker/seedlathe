@@ -40,7 +40,7 @@ const int kNumPresets = 1;
 // resonance offset, 2x oversampling and multitimbral on. Nothing after the
 // parameters can catch that; only a header before them can.
 constexpr uint32_t kStateMagic = 0x414C4453u;   // 'SDLA'
-constexpr int kStateVersion = 3;
+constexpr int kStateVersion = 4;   // five macro parameters added
 
 enum EControlTags
 {

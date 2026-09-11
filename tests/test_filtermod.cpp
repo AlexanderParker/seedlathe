@@ -72,6 +72,15 @@ struct Rig {
 double dB(double a, double b) { return 20.0 * std::log10(std::max(a, 1e-12) /
                                                          std::max(b, 1e-12)); }
 
+// The two filter macros, in the units the old two-argument call used: the
+// cutoff in semitones rather than as a ratio.
+sl::VoiceMacros filterMod(double cutoffSemitones, double resonanceDb) {
+    sl::VoiceMacros m;
+    m.cutoffRatio = std::pow(2.0, cutoffSemitones / 12.0);
+    m.resonanceDb = resonanceDb;
+    return m;
+}
+
 } // namespace
 
 TEST_CASE("filter modulation reaches a note that is already sounding") {
@@ -91,7 +100,7 @@ TEST_CASE("filter modulation reaches a note that is already sounding") {
 
     // Close the filter WITHOUT retriggering. Five octaves down from 20 kHz is
     // 625 Hz, well under the sawtooth's harmonics at middle C.
-    rig.pool.setFilterMod(-60.0, 0.0);
+    rig.pool.setMacros(filterMod(-60.0, 0.0));
 
     // Skip the smoothing glide, then measure again.
     double glideRms = 0.0, glideHf = 0.0;
@@ -116,7 +125,7 @@ TEST_CASE("filter modulation at its default changes nothing at all") {
         Rig rig;
         rig.rack.prewarm(inst);
         rig.rack.buildPending();
-        if (touchMod) rig.pool.setFilterMod(0.0, 0.0);
+        if (touchMod) rig.pool.setMacros(filterMod(0.0, 0.0));
         rig.pool.noteOn(&rig.rack, inst, 0, 1.0, true);
         std::vector<float> out;
         for (int b = 0; b < 120; ++b) {
@@ -143,7 +152,7 @@ TEST_CASE("resonance modulation adds a peak rather than level") {
         Rig rig;
         rig.rack.prewarm(inst);
         rig.rack.buildPending();
-        rig.pool.setFilterMod(0.0, resDb);
+        rig.pool.setMacros(filterMod(0.0, resDb));
         rig.pool.noteOn(&rig.rack, inst, 0, 1.0, true);
         double rms = 0.0, hf = 0.0;
         rig.measure(30, rms, hf);      // settle
@@ -175,12 +184,12 @@ TEST_CASE("a recycled voice starts on the current modulation, not the old one") 
         rig.rack.buildPending();
 
         if (closeFirst) {
-            rig.pool.setFilterMod(-60.0, 0.0);
+            rig.pool.setMacros(filterMod(-60.0, 0.0));
             rig.pool.noteOn(&rig.rack, inst, 0, 1.0, true);
             double rms = 0.0, hf = 0.0;
             rig.measure(40, rms, hf);
             rig.pool.allNotesOff();
-            rig.pool.setFilterMod(0.0, 0.0);
+            rig.pool.setMacros(filterMod(0.0, 0.0));
         }
 
         rig.pool.noteOn(&rig.rack, inst, 0, 1.0, true);
@@ -194,4 +203,187 @@ TEST_CASE("a recycled voice starts on the current modulation, not the old one") 
     INFO("fresh " << fresh << ", recycled " << recycled);
     REQUIRE(fresh > 0.0);
     REQUIRE(recycled > fresh * 0.9);
+}
+
+// ------------------------------------------------------------ the macro set
+//
+// Each of these has to do something musically obvious AND be exactly nothing
+// at its default, because the fidelity suite compares this engine against a
+// zyn.js that has none of them.
+
+TEST_CASE("every macro at its default renders bit-identically") {
+    // The whole set at once. If any single field's neutral value were only
+    // approximately neutral -- a lerp that is not exact at 1.0, say -- this
+    // catches it without needing a test per field.
+    const auto inst = sl::generateInstrument(13u);   // 2 oscillators, FM, reverb
+
+    const auto run = [&inst](bool touch) {
+        Rig rig;
+        rig.rack.prewarm(inst);
+        rig.rack.buildPending();
+        if (touch) rig.pool.setMacros(sl::VoiceMacros{});
+        rig.pool.noteOn(&rig.rack, inst, 0, 1.0, true);
+        std::vector<float> out;
+        for (int b = 0; b < 120; ++b) {
+            rig.pool.render(rig.l.data(), rig.r.data(), 256);
+            out.insert(out.end(), rig.l.begin(), rig.l.end());
+        }
+        return out;
+    };
+
+    const auto plain = run(false);
+    const auto neutral = run(true);
+    REQUIRE(plain.size() == neutral.size());
+    for (size_t i = 0; i < plain.size(); ++i)
+        REQUIRE(plain[i] == neutral[i]);
+}
+
+TEST_CASE("filter envelope amount holds the filter still at zero") {
+    // A filter envelope that falls from wide open to nearly shut over a
+    // second and a half. With the envelope live, the start of the note is
+    // far louder than the end; held still, the two match.
+    sl::Instrument inst = brightSaw();
+    inst.oscs[0].adsrFilter = {0.001, 1.0, 1.5, 0.05, 0.0, 0.05, 0.05, 0.05};
+
+    const auto swing = [&inst](double amount) {
+        Rig rig;
+        rig.rack.prewarm(inst);
+        rig.rack.buildPending();
+        sl::VoiceMacros m;
+        m.filterEnvAmount = amount;
+        rig.pool.setMacros(m);
+        rig.pool.noteOn(&rig.rack, inst, 0, 1.0, true);
+
+        // Brightness, not level: a sawtooth's power sits almost entirely in
+        // its fundamental, so a lowpass sweeping from 20 kHz to 1 kHz moves
+        // the RMS by under a decibel while gutting the harmonics.
+        double rms = 0.0, hf = 0.0;
+        rig.measure(2, rms, hf);          // past the 5 ms gain attack
+        double early = 0.0;
+        rig.measure(8, rms, early);       // ~43 ms, still near the top
+
+        rig.measure(340, rms, hf);        // ~1.8 s: the decay is over
+        double late = 0.0;
+        rig.measure(20, rms, late);
+
+        return dB(early, late);
+    };
+
+    const double moving = swing(1.0);
+    const double held = swing(0.0);
+    INFO("start-vs-end level: moving " << moving << " dB, held " << held << " dB");
+    REQUIRE(moving > 10.0);
+    // Held still, the two windows are the same filter, so the difference
+    // collapses to whatever the envelope's own gain does -- nothing like the
+    // sweep.
+    REQUIRE(std::fabs(held) < 3.0);
+}
+
+TEST_CASE("LFO depth scales the wobble, and zero removes it") {
+    // A slow filter LFO on an otherwise static patch. Windows of 43 ms cover
+    // twenty-odd cycles of the sawtooth, so where a block boundary falls in
+    // the waveform stops mattering, and a 2 Hz LFO is slow enough that
+    // successive windows sample different parts of its cycle.
+    sl::Instrument inst = brightSaw();
+    inst.oscs[0].adsrFilter = {0.001, 0.06, 0.0, 0.06, 0.0, 0.06, 0.05, 0.06};
+    inst.oscs[0].fLfo = {true, sl::Waveform::Sine, 2.0, 900.0};
+
+    const auto spread = [&inst](double depth) {
+        Rig rig;
+        rig.rack.prewarm(inst);
+        rig.rack.buildPending();
+        sl::VoiceMacros m;
+        m.lfoDepth = depth;
+        rig.pool.setMacros(m);
+        rig.pool.noteOn(&rig.rack, inst, 0, 1.0, true);
+
+        double rms = 0.0, hf = 0.0;
+        rig.measure(20, rms, hf);         // settle
+
+        double lo = 1e9, hi = 0.0;
+        for (int w = 0; w < 12; ++w) {    // 12 x 43 ms covers one LFO cycle
+            rig.measure(8, rms, hf);
+            lo = std::min(lo, hf);
+            hi = std::max(hi, hf);
+        }
+        return hi / std::max(lo, 1e-12);
+    };
+
+    const double full = spread(1.0);
+    const double none = spread(0.0);
+    INFO("brightness spread over an LFO cycle: full " << full << ", none " << none);
+    REQUIRE(full > 2.0);
+    REQUIRE(none < 1.2);
+}
+
+TEST_CASE("release scales how long a note takes to die") {
+    const sl::Instrument inst = brightSaw();
+
+    const auto tailBlocks = [&inst](double scale) {
+        Rig rig;
+        rig.rack.prewarm(inst);
+        rig.rack.buildPending();
+        sl::VoiceMacros m;
+        m.release = scale;
+        rig.pool.setMacros(m);
+        rig.pool.noteOn(&rig.rack, inst, 0, 1.0, true);
+
+        double rms = 0.0, hf = 0.0;
+        rig.measure(20, rms, hf);
+        rig.pool.noteOff(0);
+
+        // How many blocks until the voice lets go.
+        int blocks = 0;
+        while (rig.pool.activeCount() > 0 && blocks < 4000) {
+            rig.pool.render(rig.l.data(), rig.r.data(), 256);
+            ++blocks;
+        }
+        return blocks;
+    };
+
+    const int normal = tailBlocks(1.0);
+    const int longer = tailBlocks(4.0);
+    INFO("release blocks: normal " << normal << ", 4x " << longer);
+    REQUIRE(normal > 0);
+    REQUIRE(longer > normal * 2);
+}
+
+TEST_CASE("a release already under way keeps the shape it started with") {
+    // Read once at note-off, not per sample. The voice's END time is fixed
+    // at note-off either way, so stretching the per-oscillator ramp mid-fade
+    // would not lengthen the note -- it would leave the level still high
+    // when the voice is cut, which is a click. This measures the SHAPE of
+    // the fade rather than its length, because the length cannot show it.
+    const sl::Instrument inst = brightSaw();
+
+    const auto fadeLevel = [&inst](bool stretchMidway) {
+        Rig rig;
+        rig.rack.prewarm(inst);
+        rig.rack.buildPending();
+        rig.pool.noteOn(&rig.rack, inst, 0, 1.0, true);
+
+        double rms = 0.0, hf = 0.0;
+        rig.measure(20, rms, hf);
+        rig.pool.noteOff(0);
+
+        if (stretchMidway) {
+            // One block in, well inside the 50 ms release.
+            rig.pool.render(rig.l.data(), rig.r.data(), 256);
+            sl::VoiceMacros m;
+            m.release = 4.0;
+            rig.pool.setMacros(m);
+            rig.measure(3, rms, hf);
+        } else {
+            rig.measure(4, rms, hf);
+        }
+        return rms;      // how loud it still is, part way down
+    };
+
+    const double untouched = fadeLevel(false);
+    const double stretched = fadeLevel(true);
+    INFO("level part way through the fade: untouched " << untouched
+         << ", stretched mid-fade " << stretched);
+    REQUIRE(untouched > 0.0);
+    // Within a few percent: the fade must ignore the change entirely.
+    REQUIRE(std::fabs(stretched - untouched) < untouched * 0.05);
 }

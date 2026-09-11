@@ -52,8 +52,10 @@ Patches copy and paste as JSON if you want to keep one outside the plugin.
 
 ## Playing
 
-Volume, octave, cutoff and resonance sit in the header. All four are host
-parameters, so they automate.
+Volume, octave, cutoff and resonance sit in the header. The Instrument tab
+has the full live set: cutoff, resonance, filter envelope amount, LFO rate
+and depth, FM depth, and release. These are the controls that reach a note
+while it is sounding, and all of them are host parameters, so they automate.
 
 The plugin responds to velocity, sustain (CC 64), pitch bend and program
 change. **Multitimbral** in Settings gives each MIDI channel its own

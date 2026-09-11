@@ -14,6 +14,45 @@ namespace sl {
 // zyn's Z.freq: middle C is note 0 at 261.63 Hz.
 double noteFrequency(int rootNote, int noteOffset);
 
+// The live controls: everything that reaches a note which has already
+// started. A seed schedules its envelopes at note-on and plays them back, so
+// without these the instrument can be triggered but not played.
+//
+// EVERY field is exactly neutral at its default. x1.0 and +0.0 are exact in
+// IEEE arithmetic, so an untouched voice renders sample for sample what it
+// rendered before any of this existed -- which the fidelity suite, comparing
+// against a zyn.js that has none of it, depends on.
+struct VoiceMacros {
+    // Multiplies the filter cutoff, matching Web Audio's
+    // BiquadFilterNode.detune: the computed frequency there is
+    // frequency * 2^(detune/1200), so a ratio is the exact analogue of a
+    // detune in cents. An additive offset in Hz would be the easier thing to
+    // write and the wrong thing to play -- inaudible on a cutoff sitting at
+    // 15 kHz, catastrophic on one at 200 Hz.
+    double cutoffRatio = 1.0;
+
+    // Added to the Q envelope, because Web Audio's Q for a lowpass is already
+    // in decibels (see WaBiquad::setCoefficients).
+    double resonanceDb = 0.0;
+
+    // How far the filter envelope SWINGS, about the level it settles at.
+    // Zero holds the filter still at its sustain value; one is the envelope
+    // as generated; two exaggerates it. Deliberately not a second cutoff
+    // control: scaling the whole envelope would just be cutoffRatio again.
+    double filterEnvAmount = 1.0;
+
+    // Scale every LFO's rate and depth, and the FM depth, across all three
+    // LFOs and both FM paths. One control each rather than one per source:
+    // an instrument has up to fifteen LFOs, and nobody automates fifteen.
+    double lfoRate = 1.0;
+    double lfoDepth = 1.0;
+    double fmDepth = 1.0;
+
+    // Scales every oscillator's release. Read once at note-off, so a note
+    // already fading keeps the length it started with.
+    double release = 1.0;
+};
+
 // One sounding note. Holds its own copy of the instrument, so editing the
 // design mid-chord cannot mutate a ringing voice.
 //
@@ -46,26 +85,8 @@ public:
     // FM sidebands with it, which is what a detune input does in Web Audio.
     void setBendRatio(double ratio) { bendRatio_ = ratio; }
 
-    // Live filter modulation, applied on top of the scheduled cutoff and Q
-    // envelopes and therefore heard on notes that are already sounding.
-    //
-    // cutoffRatio MULTIPLIES the cutoff, matching Web Audio's
-    // BiquadFilterNode.detune -- the computed frequency there is
-    // frequency * 2^(detune/1200), so a ratio is the exact analogue of a
-    // detune in cents. An additive Hz offset would be the easier thing to
-    // write and the wrong thing to play: it is inaudible on a cutoff sitting
-    // at 15 kHz and catastrophic on one at 200 Hz.
-    //
-    // resonanceDb ADDS to the Q envelope, because Web Audio's Q for a lowpass
-    // is already in decibels (see WaBiquad::setCoefficients).
-    //
-    // Both are no-ops at their defaults -- x1.0 and +0.0 are exact in IEEE
-    // arithmetic -- so an unmodulated voice renders sample for sample what it
-    // rendered before this existed.
-    void setFilterMod(double cutoffRatio, double resonanceDb) {
-        cutoffModTarget_ = cutoffRatio;
-        resModTarget_ = resonanceDb;
-    }
+    void setMacros(const VoiceMacros& m) { target_ = m; }
+    const VoiceMacros& macros() const { return target_; }
 
     void kill();                    // immediate, for voice stealing
 
@@ -97,6 +118,11 @@ private:
         bool isNoise = false;
         double baseFreq = 0.0;
         double releaseTime = 0.0;
+
+        // Where the filter envelope settles, which is the pivot the envelope
+        // amount swings about. Captured at note-on because it comes from the
+        // instrument this voice copied, not from the one on screen now.
+        double filterSustain = 0.0;
         SharedFxRack::Route route;
 
         // Mono output for the current block; panned as it is pushed.
@@ -146,12 +172,18 @@ private:
     bool sustainHeld_ = false;
     double bendRatio_ = 1.0;
 
-    // Filter modulation, and the smoother that keeps a knob sweep from
-    // stepping the coefficients audibly. Targets are written from outside at
-    // block boundaries; the smoothed values advance once per sub-block, so the
-    // granularity is 32 samples rather than a whole host block.
-    double cutoffModTarget_ = 1.0, resModTarget_ = 0.0;
-    double cutoffMod_ = 1.0, resMod_ = 0.0;
+    // The macros, and the smoother that keeps a knob sweep from stepping the
+    // filter coefficients or a modulation depth audibly. Targets are written
+    // from outside at block boundaries; the smoothed values advance once per
+    // sub-block, so the granularity is 32 samples rather than a host block.
+    //
+    // Release is not smoothed: it is read once, at note-off, and gliding it
+    // would mean a note whose fade changes length while it is fading. LFO
+    // rate is not smoothed either -- the oscillators are phase-continuous, so
+    // a rate change is inaudible as a discontinuity.
+    VoiceMacros target_{};
+    VoiceMacros now_{};
+    double releaseScale_ = 1.0;      // captured at note-off
     double modCoefPerSample_ = 0.0;
     static constexpr double kModSmoothSeconds = 0.012;
 
@@ -191,15 +223,11 @@ public:
     void setPitchBend(double semitones);
     double pitchBend() const { return bendSemitones_; }
 
-    // Live filter modulation for every voice, sounding or not yet started.
-    //
-    // cutoffSemitones transposes the filter cutoff the way a note number
-    // transposes a pitch; resonanceDb adds to the Q envelope. Cheap enough to
-    // call every block -- it converts once and early-outs when nothing moved --
-    // which is how the plugin keeps it in step with host automation.
-    void setFilterMod(double cutoffSemitones, double resonanceDb);
-    double filterModSemitones() const { return cutoffSemis_; }
-    double filterModResonanceDb() const { return resonanceDb_; }
+    // The live controls, for every voice, sounding or not yet started. Cheap
+    // enough to call every block: it early-outs when nothing moved, which is
+    // how the plugin keeps them in step with host automation.
+    void setMacros(const VoiceMacros& m);
+    const VoiceMacros& macros() const { return macros_; }
 
     // Mixes every rack that sounding voices reference, and -- when the caller
     // supplies the full set -- every rack still ringing. A reverb tail
@@ -226,8 +254,7 @@ private:
     double sampleRate_ = 48000.0;
     bool sustainPedal_ = false;
     double bendSemitones_ = 0.0;
-    double cutoffSemis_ = 0.0, resonanceDb_ = 0.0;
-    double cutoffRatio_ = 1.0;
+    VoiceMacros macros_{};
 };
 
 } // namespace sl
